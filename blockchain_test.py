@@ -55,7 +55,8 @@ def test_blockchain_raw1():
     import threading
 
     names_to_keys = {b"name1": blockchain.gen_key_pair(), b"name2": blockchain.gen_key_pair(),
-        b"name4": blockchain.gen_key_pair(), b"name3": blockchain.gen_key_pair(), b"name5": blockchain.gen_key_pair()}
+                     b"name4": blockchain.gen_key_pair(), b"name3": blockchain.gen_key_pair(),
+                     b"name5": blockchain.gen_key_pair()}
 
     def name_to_private_public_key(name: bytes):
         return names_to_keys[name]
@@ -115,7 +116,8 @@ def test_blockchain_class1():
     import random
 
     names_to_keys = {b"name1": blockchain.gen_key_pair(), b"name2": blockchain.gen_key_pair(),
-        b"name4": blockchain.gen_key_pair(), b"name3": blockchain.gen_key_pair(), b"name5": blockchain.gen_key_pair()}
+                     b"name4": blockchain.gen_key_pair(), b"name3": blockchain.gen_key_pair(),
+                     b"name5": blockchain.gen_key_pair()}
 
     def name_to_private_public_key(name: bytes):
         return names_to_keys[name]
@@ -123,8 +125,8 @@ def test_blockchain_class1():
     init_balance = {name_to_private_public_key(name)[1]: value for name, value in
                     {b"name1": 101, b"name2": 2, b"name4": 624, b"name3": 84, b"name5": 1000}.items()}
 
-    chain = blockchain.Blockchain(name_to_private_public_key(b"name5")[1], None, init_balance,
-                                  blockchain.BlockchainConfig(), "threading")
+    chain_handler = blockchain.BlockchainHandler(name_to_private_public_key(b"name5")[1], None, init_balance,
+                                                 blockchain.BlockchainConfig(), "threading")
 
     def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
         uuid_bytes = random.randbytes(blockchain.Transaction.BYTE_COUNTS[4])
@@ -142,7 +144,7 @@ def test_blockchain_class1():
     def test_transaction(sender: bytes, receiver: bytes):
         transaction = get_test_transaction(sender, receiver, 10)
         transaction_bytes = transaction.to_bytes()
-        chain.add_transaction(transaction_bytes)
+        chain_handler.add_transaction(transaction_bytes)
 
     test_transaction(b"name1", b"name2")
     test_transaction(b"name1", b"name2")
@@ -157,7 +159,7 @@ def test_blockchain_class1():
 
     import time
     time.sleep(5)
-    _, balances = chain.end()
+    _, balances = chain_handler.end()
     balances = {hex(int.from_bytes(key))[:20]: value for key, value in balances.items()}
     balances_values = list(balances.values())
     return balances_values

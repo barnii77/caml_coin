@@ -16,7 +16,7 @@ except AttributeError:
     raise RuntimeError("mp.queues submodule could not be loaded. this is a bug in python std lib... sry :(")
 
 KEY_SIZE = 4096
-ENDIAN = "little"
+ENDIAN = "big"
 LXX = lambda x: x
 VALID_BLOCK_LEADING_ZEROS = 8
 CUDA_MINER_PATH = "miner.cu"
@@ -356,8 +356,8 @@ def broadcast_balances(broadcast_buffer, balances: dict[bytes, int], copy: bool 
 
 def blockchain(validator: bytes, chain: "Block" = None, transaction_recv_buffer=None, chain_recv_buffer=None,
                chain_broadcast_buffer=None, balance_broadcast_buffer=None, init_balance=None, terminate_event=None,
-               has_terminated_event=None, use_cuda_miner_event=None, incompatible_chain_distrust=5,
-               compatible_chain_distrust=1, val_reward: int = 1, const_transaction_fee: int = 0,
+               has_terminated_event=None, use_cuda_miner_event=None, incompatible_chain_distrust: int = 5,
+               compatible_chain_distrust: int = 1, val_reward: int = 1, const_transaction_fee: int = 0,
                max_recv_chains_per_iter: int = -1, max_recv_transactions_per_iter: int = -1,
                copy_balances_on_broadcast=False):
     """
@@ -427,9 +427,9 @@ def blockchain(validator: bytes, chain: "Block" = None, transaction_recv_buffer=
 
 
 class BlockchainConfig:
-    def __init__(self, incompatible_chain_distrust: int = 5, compatible_chain_distrust: int = 0, val_reward: int = 1,
-                 const_transaction_fee: int = 0, max_recv_chains_per_iter: int = -1,
-                 max_recv_transactions_per_iter: int = -1, copy_balances_on_broadcast: bool = True):
+    def __init__(self, incompatible_chain_distrust: int = 5, compatible_chain_distrust: int = 1, val_reward: int = 1,
+                 const_transaction_fee: int = 0, max_recv_chains_per_iter: int = 1,
+                 max_recv_transactions_per_iter: int = 4, copy_balances_on_broadcast: bool = True):
         self.incompatible_chain_distrust = incompatible_chain_distrust
         self.compatible_chain_distrust = compatible_chain_distrust
         self.val_reward = val_reward
@@ -439,7 +439,7 @@ class BlockchainConfig:
         self.copy_balances_on_broadcast = copy_balances_on_broadcast
 
 
-class Blockchain:
+class BlockchainHandler:
     """
     A class that represents a blockchain. It is a wrapper around the blockchain function that allows for easy
     serialization and deserialization of the blockchain. You can add transactions and alternative chains to the blockchain.
@@ -452,6 +452,8 @@ class Blockchain:
         self.validator = validator
         self.chain = chain
         self.init_balance = init_balance
+        if config is None:
+            config = BlockchainConfig()
 
         if run_with == "threading":
             self.transaction_recv_buffer = queue.Queue()
@@ -506,17 +508,14 @@ class Blockchain:
             self._process = mp.Process(target=blockchain, args=args)
             self._process.start()
 
-    def __del__(self):
-        self.kill(True)
-
     def to_bytes(self):
         return self.validator + self.chain.to_bytes()
 
     @classmethod
-    def from_bytes(cls, raw: bytes):
+    def from_bytes(cls, raw: bytes, **kwargs):
         validator, chain_bytes = raw[:KEY_SIZE // 8], raw[KEY_SIZE // 8:]
         chain = chain_from_bytes(chain_bytes)
-        return cls(validator, chain)
+        return cls(validator, chain, **kwargs)
 
     def _unsafe_clear_all_queues(self):
         while not self.transaction_recv_buffer.empty():
@@ -573,7 +572,7 @@ class Blockchain:
         self._safe_add_to_queue(chain, self.chain_recv_buffer, self._chain_queue_offload_queue,
                                 self.run_with != "direct")
 
-    def get_balances(self):
+    def get_balances(self) -> Optional[dict[bytes, int]]:
         if self.run_with in ("mp", "threading"):
             out = None
             while not self.balance_broadcast_buffer.empty():
@@ -588,7 +587,7 @@ class Blockchain:
             self._get_balances_last = out
         return self._get_balances_last
 
-    def get_chain(self):
+    def get_chain(self) -> Optional["Block"]:
         if self.run_with in ("mp", "threading"):
             out = None
             while not self.chain_broadcast_buffer.empty():
@@ -606,7 +605,7 @@ class Blockchain:
     def use_cuda_miner(self):
         self.use_cuda_miner_event.set()
 
-    def use_naive_miner(self):
+    def use_debug_miner(self):
         self.use_cuda_miner_event.clear()
 
 
