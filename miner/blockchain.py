@@ -180,7 +180,7 @@ def execute_transaction(t: "Transaction", validator: bytes, balances: dict[bytes
 
 # TODO simd[eez nuts]
 def full_verify(block: "Block", init_balance: dict[bytes, int], val_reward: int, const_transaction_fee: int,
-                valid_block_max_hash: int):
+                relative_transaction_fee: float, valid_block_max_hash: int):
     balances = init_balance.copy()
     invalidated_uuids = set()
     if block is None:
@@ -190,7 +190,7 @@ def full_verify(block: "Block", init_balance: dict[bytes, int], val_reward: int,
 
     while block is not None:
         for t in block.transactions:
-            if not t.is_valid(balances, invalidated_uuids, const_transaction_fee):
+            if not t.is_valid(balances, invalidated_uuids, const_transaction_fee, relative_transaction_fee):
                 return False, balances, invalidated_uuids
             execute_transaction(t, block.validator, balances, invalidated_uuids)
         balances[block.validator] = balances.get(block.validator, 0) + val_reward
@@ -568,8 +568,10 @@ def _mine(validator: bytes, chain: "Block" = None, transaction_recv_channel=None
     assert const_transaction_fee >= 0, "you cannot have a negative transaction fee"
     assert 0 <= relative_transaction_fee < 1, "relative transaction fee must be in [0, 1)"
     assert len(validator) == KEY_SIZE // 8, "invalid validator public key size"
-    assert chain is None or full_verify(chain, init_balance, val_reward, const_transaction_fee, valid_block_max_hash)[
-        0], "invalid initial chain"
+    assert chain is None or \
+           full_verify(chain, init_balance, val_reward, const_transaction_fee, relative_transaction_fee,
+                       valid_block_max_hash)[
+               0], "invalid initial chain"
     assert transaction_recv_channel is None or isinstance(transaction_recv_channel,
                                                           (queue.Queue, mp.queues.Queue, list))
     assert chain_recv_channel is None or isinstance(chain_recv_channel, (queue.Queue, mp.queues.Queue, list))
@@ -623,7 +625,8 @@ def _mine(validator: bytes, chain: "Block" = None, transaction_recv_channel=None
         for recv_chain in recv_chains:
             new_chain_len = chain_len(recv_chain)
             is_valid, new_balances, new_invalidated_uuids = full_verify(recv_chain, init_balance, val_reward,
-                                                                        const_transaction_fee, valid_block_max_hash)
+                                                                        const_transaction_fee, relative_transaction_fee,
+                                                                        valid_block_max_hash)
             if side_channel is not None:
                 broadcast_side_channel(side_channel, SideChannelItemType.CHAIN_VALIDITY_PAIR,
                                        (recv_chain.to_bytes(), is_valid))
