@@ -1,3 +1,6 @@
+numpy==1.23.1
+cupy
+requests
 cryptography
 flask
 flask_login

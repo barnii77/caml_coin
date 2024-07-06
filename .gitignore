@@ -1,5 +1,5 @@
-config.json
-keys/
-chains/
-keys/public_key.bin
-keys/private_key.bin
+miner/config.json
+miner/keys/
+miner/chains/
+miner/keys/public_key.bin
+miner/keys/private_key.bin

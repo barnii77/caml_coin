@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Index</title>
+    <style>
+        body {
+            font-family: monospace;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+<h1>Miner Public Key</h1>
+<p>
+    {% for vi in range(len(validator) // VALIDATOR_CHARS_PER_LINE) %}
+        {{ validator[VALIDATOR_CHARS_PER_LINE * vi:(vi + 1) * VALIDATOR_CHARS_PER_LINE] }}<br>
+    {% endfor %}
+</p>
+<h1>Miner Services</h1>
+<ul>
+    <li><a href="/shutdown">Shutdown</a></li>
+
+    <li><a href="/submit-transaction-hex">Submit Transaction in hexadecimal format</a></li>
+    <li><a href="/submit-chain-hex">Submit Chain in hexadecimal format</a></li>
+    <li><a href="/get-chain-hex">Get Chain in hexadecimal format</a></li>
+    <li><a href="/get-balances-hex">Get Balances in hexadecimal format</a></li>
+    <li><a href="/get-balances-hex-json">Get Balances in hexadecimal format in JSON</a></li>
+
+    <li><a href="/submit-transaction">Submit Transaction</a></li>
+    <li><a href="/submit-chain">Submit Chain</a></li>
+    <li><a href="/get-chain">Get Chain</a></li>
+    <li><a href="/get-balances">Get Balances</a></li>
+    <li><a href="/get-balances-json">Get Balances in JSON</a></li>
+
+    <li><a href="/register-as-other-miner">Register as other miner</a></li>
+</ul>
+</body>
+</html>
