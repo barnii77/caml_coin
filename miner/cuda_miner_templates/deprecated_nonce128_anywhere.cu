@@ -1,5 +1,5 @@
 /*
- * Copied from: https://github.com/mochimodev/cuda-hashing-algos/blob/master/sha256.cu
+ * SHA256 copied from: https://github.com/mochimodev/cuda-hashing-algos/blob/master/sha256.cu
  *
  * sha256.cu Implementation of SHA256 Hashing
  *
@@ -21,6 +21,11 @@ typedef unsigned long long LONG;
 
 /****************************** MACROS ******************************/
 #define SHA256_BLOCK_SIZE 32  // SHA256 outputs a 32 byte digest
+#define NONCE_SIZE 16  // 16 bytes for nonce
+
+#ifndef MAX_VALID_HASH_LOCATION
+#define MAX_VALID_HASH_LOCATION 1  // 0 = global mem, 1 = shared mem, >=2 = registers
+#endif
 
 /**************************** DATA TYPES ****************************/
 
@@ -172,7 +177,7 @@ __device__ void cuda_sha256_final(CUDA_SHA256_CTX *ctx, BYTE hash[]) {
     }
 }
 
-/// checks if a 256 bit little endian integer is less than another
+/// checks if a 256 bit little endian integer is less than or equal to another
 __device__ bool cuda_u256_lte(LONG *a, LONG *b) {
 #pragma unroll (32 / sizeof(LONG))
     for (int i = 32 / sizeof(LONG) - 1; i >= 0; i--) {
@@ -183,36 +188,88 @@ __device__ bool cuda_u256_lte(LONG *a, LONG *b) {
     return true;
 }
 
+/// adds two 128 bit little endian integers in place. for inplace add, a and c must be same pointer
+__device__ void cuda_u128_add(LONG *a, LONG *b, LONG *c) {
+    BYTE carry = 0;
+#pragma unroll (16 / sizeof(LONG))
+    for (int i = 0; i < 16 / sizeof(LONG); i++) {
+        LONG a_ = a[i], b_ = b[i];
+        LONG sum = a_ + b_ + carry;
+        carry = (sum < a_) | (sum < b_);
+        c[i] = sum;
+    }
+}
+
+__device__ bool cuda_u128_eq0(LONG *a) {
+    for (int i = 0; i < 16 / sizeof(LONG); i++) {
+        if (a[i] != 0) return false;
+    }
+    return true;
+}
+
 // all parameters are little endian
 // *nonce_out should be 0 when called, because *nonce_out == 0 will be interpreted as no nonce having been found yet
 extern "C" __global__
-void mine_sha256(BYTE const_in[SHA256_BLOCK_SIZE], LONG *nonce_out, WORD nonce_step_size, WORD n_batch_device,
-                 BYTE max_valid_hash[SHA256_BLOCK_SIZE], LONG init_nonce) {
+void mine_sha256(BYTE const_in[SHA256_BLOCK_SIZE], BYTE nonce_out[NONCE_SIZE], WORD nonce_step_size, WORD n_batch_device,
+                 BYTE max_valid_hash[SHA256_BLOCK_SIZE], BYTE init_nonce[NONCE_SIZE]) {
     WORD thread = blockIdx.x * blockDim.x + threadIdx.x;
+
+#if MAX_VALID_HASH_LOCATION == 0  // leave it in global mem
+    _max_valid_hash = (LONG *) max_valid_hash;
+#elif MAX_VALID_HASH_LOCATION == 1  // put it into shared mem
     __shared__ LONG _max_valid_hash[SHA256_BLOCK_SIZE / sizeof(LONG)];
     if (threadIdx.x < SHA256_BLOCK_SIZE / sizeof(LONG)) {
         // populate _max_valid_hash
-        _max_valid_hash[threadIdx.x] = ((LONG *) max_valid_hash)[threadIdx.x];  // from little to big endian
+        _max_valid_hash[threadIdx.x] = ((LONG *) max_valid_hash)[threadIdx.x];
     }
     __syncthreads();
+#else  // put it into thread-local registers
+    LONG _max_valid_hash[SHA256_BLOCK_SIZE / sizeof(LONG)];
+    // populate _max_valid_hash
+#pragma unroll (SHA256_BLOCK_SIZE / sizeof(LONG))
+    for (int i = 0; i < SHA256_BLOCK_SIZE / sizeof(LONG); i++) {
+        _max_valid_hash[i] = ((LONG *) max_valid_hash)[i];
+    }
+#endif
 
     if (thread >= n_batch_device) {
         return;
     }
-    LONG nonce = init_nonce + thread;
-    BYTE in[sizeof(LONG) + SHA256_BLOCK_SIZE];  // nonce + const_in = 320 bytes
+
+    LONG nonce[NONCE_SIZE / sizeof(LONG)];
+    // populate nonce
+#pragma unroll (NONCE_SIZE / sizeof(LONG))
+    for (int i = 0; i < NONCE_SIZE / sizeof(LONG); i++) {
+        nonce[i] = ((LONG *) init_nonce)[i];
+    }
+    nonce[0] += thread;  // nonce[0] is LONG and thread is WORD -> overflow-safe
+
+    LONG _nonce_step_size[NONCE_SIZE / sizeof(LONG)];
+    // populate nonce_step_size
+#pragma unroll (NONCE_SIZE / sizeof(LONG))
+    for (int i = 0; i < NONCE_SIZE / sizeof(LONG); i++) {
+        _nonce_step_size[i] = 0;
+    }
+    _nonce_step_size[0] = nonce_step_size;
+
+    BYTE in[sizeof(nonce_out) + SHA256_BLOCK_SIZE];  // nonce + const_in = 384 bytes
     BYTE out[SHA256_BLOCK_SIZE];
     CUDA_SHA256_CTX ctx;
-    for (; *nonce_out == 0; nonce += nonce_step_size) {
+    for (; cuda_u128_eq0((LONG*)nonce_out); cuda_u128_add(nonce, _nonce_step_size, nonce)) {
         // write nonce to first bytes of in
-        *((LONG *) in) = nonce;
+        for (int i = 0; i < sizeof(nonce) / sizeof(LONG); i++) {
+            ((LONG *) in)[i] = nonce[i];
+        }
         // sha256 with little endian output
         cuda_sha256_init(&ctx);
         cuda_sha256_update(&ctx, in, sizeof(in));
         cuda_sha256_final(&ctx, out);
         // check if nonce is valid
         if (cuda_u256_lte((LONG *) out, _max_valid_hash)) {
-            *nonce_out = nonce;
+            // write nonce to nonce_out
+            for (int i = 0; i < sizeof(nonce_out) / sizeof(LONG); i++) {
+                ((LONG *) nonce_out)[i] = nonce[i];
+            }
         }
     }
 }
