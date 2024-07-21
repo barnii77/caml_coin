@@ -225,7 +225,7 @@ extern "C" __global__ void mine_sha256(BYTE const const_in[SHA256_BLOCK_SIZE],
 #else                               // put it into thread-local registers
     uint256_t _max_valid_hash;
     // populate _max_valid_hash
-#pragma unroll SHA256_BLOCK_SIZE / sizeof(WORD)
+#pragma unroll 32 / sizeof(WORD)
     for (int i = 0; i < SHA256_BLOCK_SIZE / sizeof(WORD); i++) {
         ((WORD *) &_max_valid_hash)[i] = ((WORD *) max_valid_hash)[i];
     }
@@ -238,7 +238,7 @@ extern "C" __global__ void mine_sha256(BYTE const const_in[SHA256_BLOCK_SIZE],
     uint128_t nonce = *((uint128_t *) init_nonce) + thread;
     BYTE in[sizeof(uint128_t) +
             SHA256_BLOCK_SIZE];  // nonce + const_in = 384 bytes
-#pragma unroll SHA256_BLOCK_SIZE / sizeof(WORD)
+#pragma unroll 32 / sizeof(WORD)
     for (int i = 0; i < SHA256_BLOCK_SIZE / sizeof(WORD); i++) {
         ((WORD *) in)[i + sizeof(uint128_t) / sizeof(WORD)] = ((WORD *) const_in)[i];
     }
@@ -247,7 +247,7 @@ extern "C" __global__ void mine_sha256(BYTE const const_in[SHA256_BLOCK_SIZE],
     CUDA_SHA256_CTX ctx;
     uint128_t *_nonce_out = (uint128_t *) nonce_out;
     bool success = false;
-    for (; *_nonce_out == 0; nonce += nonce_step_size) {
+    while (1) {
         // write nonce to first bytes of in
         *((uint128_t *) in) = nonce;
         // sha256 with little endian output
@@ -257,8 +257,9 @@ extern "C" __global__ void mine_sha256(BYTE const const_in[SHA256_BLOCK_SIZE],
         // check if nonce is valid
         if (cuda_u256_lte(out, _max_valid_hash)) {
             success = atomicCAS((WORD *) nonce_out, 0, 1) == 0;
-            break;
         }
+        if (*_nonce_out != 0) break;
+        nonce += nonce_step_size;
     }
 
     // without syncthreads, if another thread was just doing the atomicCAS and I

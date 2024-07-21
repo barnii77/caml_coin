@@ -8,18 +8,27 @@ import cupy as cp
 
 from typing import List, Union, Optional, Dict, Set
 
-from miner.miner_utils import thread_yield, sha256
+from miner_utils import thread_yield, sha256, broken
 
 _cuda_miner_code: Optional[str] = None
+_cuda_miner_path: Optional[str] = None
+_cuda_miner_code_type: Optional[str] = None  # one of "cuda", "ptx", "cubin"
 CUDA_MINER_FUNCTION_NAME = "mine_sha256"
-AUTOTUNE_INPUTS = (
-    1234,
-    0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
-    1,
-)
-AUTOTUNE_PAUSE_AFTER_MEASUREMENTS = 0.1
+AUTOTUNE_INPUTS = [
+    (
+        # TODOLATER make difficulty bigger when autotuning works
+        x,
+        0x00000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,  # 0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+        1,
+    )
+    for x in range(1, 5)  # TODOLATER make 13 when autotuning works
+]
+AUTOTUNE_PAUSE_AFTER_MEASUREMENTS = 0.5
 _miner_input_pools = {}
 ALIGNMENT_REQUIREMENT = 32
+
+# TODOLATER allow passing different args to different kernels when autotuning because step size is different per config
+# TODOLATER investigate why incremental emulated uint128 kernel sometimes hangs
 
 
 def copy_tensors(*args):
@@ -117,6 +126,7 @@ class CudaMultiDeviceLaunchConfig:
         return f"CudaMultiDeviceLaunchConfig(device_id_to_config={self.device_id_to_config})"
 
     @staticmethod
+    @broken("autotuning currently doesn't work")
     def autotune_for_each_device(
         kernel: "KernelTemplate",
         autotune_configs: Dict[int, List["CudaDeviceLaunchConfig"]],
@@ -150,8 +160,15 @@ class CudaMultiDeviceLaunchConfig:
 
 
 class KernelTemplate:
-    def __init__(self, raw_kernel_code: str, _kernel_lru_cache_max_size=1):
-        self.raw_kernel_code = raw_kernel_code
+    def __init__(
+        self, code: str = None, path: str = None, _kernel_lru_cache_max_size=1
+    ):
+        if code is None and path is None:
+            raise ValueError("either code or path must be provided")
+        if code is not None and path is not None:
+            raise ValueError("only one of code or path can be provided")
+        self.code = code
+        self.path = path
         self._kernel_lru_cache_keys = []
         self._kernel_lru_cache_values = []
         self._kernel_lru_cache_max_size = _kernel_lru_cache_max_size
@@ -170,28 +187,29 @@ class KernelTemplate:
             self._kernel_lru_cache_keys.append(launch_config)
             self._kernel_lru_cache_values.append(kernel)
         else:
-            nvrtc_options = (
-                tuple(
-                    self.raw_kernel_code[
-                        len("// NVRTC-OPTIONS: ") : self.raw_kernel_code.find("\n")
-                    ].split()
+            if self.code is not None:
+                nvrtc_options = (
+                    tuple(self.code[len("// NVRTC-OPTIONS: "): self.code.find("\n")].split())
+                    if self.code.startswith("// NVRTC-OPTIONS: ")
+                    else ()
                 )
-                if self.raw_kernel_code.startswith("// NVRTC-OPTIONS: ")
-                else ()
-            )
-            kernel_code = (
-                "\n".join(
-                    map(
-                        lambda p: f"#define {p[0]} ({p[1]})",
-                        launch_config.template_params.items(),
+                kernel_code = (
+                    "\n".join(
+                        map(
+                            lambda p: f"#define {p[0]} ({p[1]})",
+                            launch_config.template_params.items(),
+                        )
                     )
+                    + "\n\n"
+                    + self.code
                 )
-                + "\n\n"
-                + self.raw_kernel_code
-            )
-            kernel = cp.RawModule(code=kernel_code, options=nvrtc_options).get_function(
-                CUDA_MINER_FUNCTION_NAME
-            )
+                kernel = cp.RawModule(
+                    code=kernel_code, options=nvrtc_options
+                ).get_function(CUDA_MINER_FUNCTION_NAME)
+            else:
+                kernel = cp.RawModule(path=self.path).get_function(
+                    CUDA_MINER_FUNCTION_NAME
+                )
             if len(self._kernel_lru_cache_keys) >= self._kernel_lru_cache_max_size:
                 self._kernel_lru_cache_keys.pop(0)
                 self._kernel_lru_cache_values.pop(0)
@@ -206,16 +224,17 @@ class KernelTemplate:
                 )
             kernel(launch_config.grid_dim, launch_config.block_dim, args)
 
+    @broken("autotuning currently doesn't work")
     def autotune(
         self,
         autotune_configs: List[CudaDeviceLaunchConfig],
         kernel_arg_settings: List[tuple],
         device_id: int = 0,
-        n_warmup_repeats: int = 8,
-        n_measure_repeats: int = 32,
+        n_warmup_repeats: int = 1,
+        n_measure_repeats: int = 8,
         timeout_ns: Optional[int] = None,
         check_cache: bool = True,
-        save_to_cache: bool = True,
+        save_to_cache: bool = False,  # TODOLATER set to true
         show_progress: bool = False,
     ) -> CudaDeviceLaunchConfig:
         """
@@ -235,7 +254,9 @@ class KernelTemplate:
         # check_cache = check_cache and device_name != "UNAVAILABLE"
         # save_to_cache = save_to_cache and device_name != "UNAVAILABLE"
         cache_key = sha256(
-            f"DEVICE_NAME: {device_name}\nDEVICE_ID: {device_id}\nCODE:\n{self.raw_kernel_code}".encode("utf-8")
+            f"DEVICE_NAME: {device_name}\nDEVICE_ID: {device_id}\nCODE:\n{self.code}".encode(
+                "utf-8"
+            )
         ).hex()
         if check_cache and os.path.exists(".autotune_cache.json"):
             with open(".autotune_cache.json") as f:
@@ -249,15 +270,19 @@ class KernelTemplate:
 
         total_times = [0] * len(autotune_configs)
         error_dummy_tensor = cp.zeros((1,))
-        n_kernel_runs = (n_warmup_repeats + n_measure_repeats) * len(kernel_arg_settings) * len(autotune_configs)
+        n_kernel_runs = (
+            (n_warmup_repeats + n_measure_repeats)
+            * len(kernel_arg_settings)
+            * len(autotune_configs)
+        )
         n_runs_completed = 0
         for j in range(n_warmup_repeats + n_measure_repeats):
-            for args in kernel_arg_settings:
+            for k, args in enumerate(kernel_arg_settings):
                 for i, config in enumerate(autotune_configs):
                     if show_progress:
                         print(
                             f"Running kernel {n_runs_completed + 1}/{n_kernel_runs} for device {device_name} with id {device_id}, "
-                            f"arg {kernel_arg_settings.index(args) + 1}/{len(kernel_arg_settings)}, "
+                            f"arg {k + 1}/{len(kernel_arg_settings)}, "
                             f"config {i + 1}/{len(autotune_configs)}",
                         )
                     start_event, end_event = cp.cuda.Event(), cp.cuda.Event()
@@ -350,22 +375,40 @@ class FixedLaunchConfigKernel:
             )
 
 
-def init(miner_code_path="miner_template.cu"):
-    global _cuda_miner_code
+def init(
+    miner_code_path="cuda_miner_template/src/nonce128_emulated_uint128_random_anywhere.cu",
+):
+    global _cuda_miner_code, _cuda_miner_code_type, _cuda_miner_path
+    _cuda_miner_path = miner_code_path
     with open(miner_code_path) as f:
         _cuda_miner_code = f.read()
+    if miner_code_path.endswith(".cu"):
+        _cuda_miner_code_type = "cuda"
+    elif miner_code_path.endswith(".ptx"):
+        _cuda_miner_code_type = "ptx"
+    elif miner_code_path.endswith(".cubin"):
+        _cuda_miner_code_type = "cubin"
 
 
+@broken("autotuning currently doesn't work")
 def get_reasonable_autotune_configs() -> List[CudaDeviceLaunchConfig]:
+    # return [
+    #     CudaDeviceLaunchConfig((1,), (256,)),
+    #     CudaDeviceLaunchConfig((4,), (512,)),
+    #     CudaDeviceLaunchConfig((28,), (512,)),
+    # ]
     possible_thread_counts = [64, 128, 256, 512, 1024]
-    possible_block_counts = [4, 8, 16, 32, 64, 128, 256, 512]
+    possible_block_counts = [4, 8, 16, 32, 64, 128, 256]
     return [
         CudaDeviceLaunchConfig((block_count,), (thread_count,))
         for block_count in possible_block_counts
         for thread_count in possible_thread_counts
-    ][1:]  # remove 4, 64 (too small)
+    ][
+        1:
+    ]  # remove 4, 64 (too small)
 
 
+@broken("autotuning currently doesn't work")
 def get_reasonable_multi_device_autotune_configs() -> (
     Dict[int, List[CudaDeviceLaunchConfig]]
 ):
@@ -377,9 +420,14 @@ def get_cuda_miner_kernel() -> "KernelTemplate":
     assert (
         _cuda_miner_code is not None
     ), "init must be called before get_cuda_miner_kernel"
-    return KernelTemplate(_cuda_miner_code)
+    return (
+        KernelTemplate(code=_cuda_miner_code)
+        if _cuda_miner_code_type == "cuda"
+        else KernelTemplate(path=_cuda_miner_path)
+    )
 
 
+@broken("autotuning currently doesn't work")
 def get_autotuned_cuda_miner_kernel(
     used_devices: List[int] = None,
     n_warmup_repeats=8,
@@ -389,25 +437,28 @@ def get_autotuned_cuda_miner_kernel(
     if used_devices is None:
         used_devices = list(range(cp.cuda.runtime.getDeviceCount()))
     miner_kernel = get_cuda_miner_kernel()
-    mem, const_in, max_valid_hash, nonce_out, init_nonce_ = (
-        _get_miner_kernel_args_tensors(*AUTOTUNE_INPUTS)
-    )
+    kernel_args_settings = []
     if len(used_devices) == 1:
         configs = get_reasonable_autotune_configs()
         max_batch = max(map(lambda config: config.n_threads, configs)) * max(
             map(lambda config: config.n_blocks, configs)
         )
-        kernel_args = (
-            const_in,
-            nonce_out,
-            max_batch,
-            max_batch,
-            max_valid_hash,
-            init_nonce_,
-        )
+        for inputs in AUTOTUNE_INPUTS:
+            mem, const_in, max_valid_hash, nonce_out, init_nonce_ = (
+                _get_miner_kernel_args_tensors(*inputs)
+            )
+            kernel_args = (
+                const_in,
+                nonce_out,
+                max_batch,
+                max_batch,
+                max_valid_hash,
+                init_nonce_,
+            )
+            kernel_args_settings.append(kernel_args)
         opt_config = miner_kernel.autotune(
             configs,
-            [kernel_args],
+            kernel_args_settings,
             device_id=used_devices[0],
             n_warmup_repeats=n_warmup_repeats,
             n_measure_repeats=n_measure_repeats,
@@ -418,18 +469,23 @@ def get_autotuned_cuda_miner_kernel(
         max_batch = max(map(lambda config: config.n_threads, configs)) * max(
             map(lambda config: config.n_blocks, configs)
         )
-        kernel_args = (
-            const_in,
-            nonce_out,
-            max_batch,
-            max_batch,
-            max_valid_hash,
-            init_nonce_,
-        )
+        for inputs in AUTOTUNE_INPUTS:
+            mem, const_in, max_valid_hash, nonce_out, init_nonce_ = (
+                _get_miner_kernel_args_tensors(*inputs)
+            )
+            kernel_args = (
+                const_in,
+                nonce_out,
+                max_batch,
+                max_batch,
+                max_valid_hash,
+                init_nonce_,
+            )
+            kernel_args_settings.append(kernel_args)
         opt_config = CudaMultiDeviceLaunchConfig.autotune_for_each_device(
             miner_kernel,
             configs,
-            [kernel_args],
+            kernel_args_settings,
             n_warmup_repeats=n_warmup_repeats,
             n_measure_repeats=n_measure_repeats,
             show_progress=show_progress,
@@ -555,7 +611,8 @@ def _mine_multi_device(
         kill_event_value = kill_event is not None and kill_event.is_set()
 
     found_nonce = None
-    for device_id, nonce_out in arg_collections.items():
+    for device_id, args in arg_collections.items():
+        _, nonce_out, _, _, _, _ = args
         nonce = nonce_out[0].item() + (nonce_out[1].item() << 64)
         if nonce != 0:
             found_nonce = nonce

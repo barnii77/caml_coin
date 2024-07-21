@@ -1,5 +1,6 @@
-miner/config.json
-miner/keys/
-miner/chains/
-miner/keys/public_key.bin
-miner/keys/private_key.bin
+src/miner/config.json
+src/miner/keys/
+src/miner/chains/
+src/miner/keys/public_key.bin
+src/miner/keys/private_key.bin
+src/miner/.autotune_cache.json

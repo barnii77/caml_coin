@@ -1,20 +1,23 @@
-import hashlib
 import threading
 import multiprocessing as mp
 import queue
 import enum
 import time
+import random
+import cupy as cp
 
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import (
+    decode_dss_signature,
+    encode_dss_signature,
+)
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
-from typing import Optional, Union, Any, List, Dict
+from cryptography.exceptions import InvalidSignature
+from typing import Optional, Union, Any, List, Dict, Callable
 
-from miner.miner_utils import thread_yield, sha256
+from miner_utils import thread_yield, sha256
 
-_cuda_miner_mod = None  # will be set if needed
-_cuda_miner_fixed_launch_config_kernel = None
 
 # fix python std lib bug in mp (have to create queue before I can access mp.queues and same with event and mp.synchronize)
 try:
@@ -25,37 +28,73 @@ except AttributeError:
         "mp.queues or mp.synchronize submodule could not be loaded. This is a weirdness in python stdlib... sry :("
     )
 
-KEY_SIZE = 4096
-NONCE_SIZE_BYTES = 16  # TODO make 16 when emulated kernel works
+_cuda_miner_mod = None
+_cuda_miner_fixed_launch_config_kernel = None
+_cuda_miner_load_callback_args = None
+
+# noli me tangere (do not touch)
+NONCE_SIZE_BYTES = 16
+RUN_WEAKNESS_DETECTION_WARNINGS = True
 ENDIAN = "little"
+PUB_KEY_DECODE_ENDIAN = "big"
 LXX = lambda x: x
 BALANCE_SERIALIZATION_VALUE_SIZE = 16
-RUN_WEAKNESS_DETECTION_WARNINGS = True
+PUBLIC_KEY_SIZE = 264
 HAS_VAL_REWARD_WARNING = """Warning, val_reward > 0.
 Make sure miners can't do a self-reward attack.
 A self-reward attack is when a miner spams transactions from one of his accounts to another (without broadcasting) and mines on those transactions.
 This way he can get the reward without actually doing anything (useful)."""
 
 
-def load_cuda_miner(path="miner_template.cu", autotune=True, show_progress=False):
-    import miner.cuda_miner as cuda_miner
+def schedule_jit_cuda_miner_load(*args):
+    global _cuda_miner_load_callback_args
+    _cuda_miner_load_callback_args = args
 
-    global _cuda_miner_mod, _cuda_miner_fixed_launch_config_kernel
+
+def load_cuda_miner(
+    path="cuda_miner_templates/src/nonce128_emulated_uint128_random_anywhere.cu",
+    n_blocks_if_properties_unavailable=14,
+    n_threads_per_block_if_properties_unavailable=512,
+    device_ids=None,
+):
+    # autotuner doesn't work
+    autotune = False
+    show_progress = False
+    if device_ids is None:
+        device_ids = [0]
+    import cuda_miner
+
+    global _cuda_miner_mod, _cuda_miner_fixed_launch_config_kernel, _cuda_miner_load_callback_args
+    _cuda_miner_mod = cuda_miner
+    _cuda_miner_load_callback_args = (
+        path,
+        n_blocks_if_properties_unavailable,
+        n_threads_per_block_if_properties_unavailable,
+        device_ids,
+    )
     cuda_miner.init(path)
     if autotune:
         _cuda_miner_fixed_launch_config_kernel = (
-            cuda_miner.get_autotuned_cuda_miner_kernel(
-                n_warmup_repeats=0, n_measure_repeats=2, show_progress=show_progress
-            )
+            cuda_miner.get_autotuned_cuda_miner_kernel(device_ids, 0, 1, show_progress)
         )
     else:
-        # TODO partial autotuning (grid size = number of SMs, autotune block size)
-        # TODO find reliable default config: (512, 512) seems wrong
+        configs = {}
+        for device_id in device_ids:
+            device_properties = cp.cuda.runtime.getDeviceProperties(device_id)
+            max_multiprocessors = device_properties.get(
+                "multiProcessorCount", n_blocks_if_properties_unavailable
+            )
+            max_threads_per_block = device_properties.get(
+                "maxThreadsPerBlock", n_threads_per_block_if_properties_unavailable
+            )
+            configs[device_id] = cuda_miner.CudaDeviceLaunchConfig(
+                (max_multiprocessors,), (max_threads_per_block,)
+            )
+        config = cuda_miner.CudaMultiDeviceLaunchConfig(configs)
         _cuda_miner_fixed_launch_config_kernel = cuda_miner.FixedLaunchConfigKernel(
             cuda_miner.get_cuda_miner_kernel(),
-            cuda_miner.CudaDeviceLaunchConfig((512,), (512,)),
+            config,
         )
-    _cuda_miner_mod = cuda_miner
 
 
 _global_lock = threading.Lock()
@@ -64,19 +103,34 @@ _global_lock = threading.Lock()
 class SideChannelItemType(enum.Enum):
     TRANSACTION_VALIDITY_PAIR = 0
     CHAIN_VALIDITY_PAIR = 1
+    BLOCK_VALIDITY_PAIR = 2
+
+
+def block_list(chain: "Block") -> List["Block"]:
+    """Returns a list of the blocks in a blockchain from earliest to latest"""
+    out = []
+    while chain is not None:
+        out.append(chain)
+        chain = chain.prev
+    out.reverse()
+    return out
+
+
+def reversed_block_list(chain: "Block") -> List["Block"]:
+    """Returns a list of the blocks in a blockchain from latest to earliest"""
+    out = []
+    while chain is not None:
+        out.append(chain)
+        chain = chain.prev
+    return out
 
 
 def is_valid_block(block: "Block", valid_block_max_hash: int):
-    if block is None:
-        return True
-    h = int.from_bytes(block.hash(), ENDIAN)
-    return h <= valid_block_max_hash
+    return block is None or int.from_bytes(block.hash(), ENDIAN) <= valid_block_max_hash
 
 
 def is_valid_chain(block: "Block", valid_block_max_hash: int):
-    if block is None:
-        return True
-    while block.prev is not None:
+    while block is not None:
         if not is_valid_block(block, valid_block_max_hash):
             return False
         block = block.prev
@@ -89,88 +143,87 @@ def block_is_ready(block: "Block"):
     return block.nonce != 0
 
 
-def chain_is_ready(chain: "Block"):
-    """Returns True if all blocks in the chain have a nonce != 0. Note that 0 means not mined yet."""
-    if chain is None:
-        return True
-    while chain.prev is not None:
-        if not block_is_ready(chain):
-            return False
-        chain = chain.prev
-    return True
-
-
 def deserialize_private_key(key: bytes):
-    p_bytes, q_bytes, d_bytes = (
-        key[: KEY_SIZE // 16],
-        key[KEY_SIZE // 16 : KEY_SIZE // 8],
-        key[KEY_SIZE // 8 :],
+    private_value = int.from_bytes(key, ENDIAN)
+    private_key = ec.derive_private_key(
+        private_value, ec.SECP256R1(), default_backend()
     )
-    p, q, d = (
-        int.from_bytes(p_bytes, ENDIAN),
-        int.from_bytes(q_bytes, ENDIAN),
-        int.from_bytes(d_bytes, ENDIAN),
-    )
-    private_key = rsa.RSAPrivateNumbers(
-        p=p,
-        q=q,
-        d=d,
-        dmp1=d % (p - 1),
-        dmq1=d % (q - 1),
-        iqmp=rsa.rsa_crt_iqmp(p, q),
-        public_numbers=rsa.RSAPublicNumbers(e=65537, n=p * q),
-    ).private_key(default_backend())
     return private_key
 
 
 def deserialize_public_key(key: bytes):
-    public_numbers = int.from_bytes(key, ENDIAN)
-    public_key = rsa.RSAPublicNumbers(e=65537, n=public_numbers).public_key(
-        default_backend()
+    prefix, x = key[:1], key[1:]
+    if prefix not in (b"\x02", b"\x03"):
+        raise ValueError("invalid public key prefix")
+    x_decode_endian = x if ENDIAN == PUB_KEY_DECODE_ENDIAN else x[::-1]
+    return ec.EllipticCurvePublicKey.from_encoded_point(
+        ec.SECP256R1(), prefix + x_decode_endian
     )
-    return public_key
 
 
 def serialize_private_key(key):
-    private_numbers = key.private_numbers()
-    private_bytes = (
-        private_numbers.p.to_bytes(KEY_SIZE // 16, ENDIAN)
-        + private_numbers.q.to_bytes(KEY_SIZE // 16, ENDIAN)
-        + private_numbers.d.to_bytes(KEY_SIZE // 8, ENDIAN)
-    )
+    private_value = key.private_numbers().private_value
+    private_bytes = private_value.to_bytes(PUBLIC_KEY_SIZE // 8 - 1, ENDIAN)
     return private_bytes
 
 
 def serialize_public_key(key):
     public_numbers = key.public_numbers()
-    public_bytes = public_numbers.n.to_bytes(KEY_SIZE // 8, ENDIAN)
+    x_bytes = public_numbers.x.to_bytes(PUBLIC_KEY_SIZE // 8 - 1, ENDIAN)
+    prefix = b"\x02" if public_numbers.y % 2 == 0 else b"\x03"
+    public_bytes = prefix + x_bytes
     return public_bytes
 
 
 def sign_message(message: bytes, private_key_bytes: bytes):
     private_key = deserialize_private_key(private_key_bytes)
-    signature = private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
-    return signature
+    der_signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+    r, s = decode_dss_signature(der_signature)
+    r_bytes = r.to_bytes(PUBLIC_KEY_SIZE // 8 - 1, ENDIAN)
+    s_bytes = s.to_bytes(PUBLIC_KEY_SIZE // 8 - 1, ENDIAN)
+    return r_bytes + s_bytes
 
 
 def verify_signature(message: bytes, signature: bytes, public_key_bytes: bytes):
-    public_key = deserialize_public_key(public_key_bytes)
     try:
-        # Verify the signature
-        public_key.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
-    except Exception:
+        public_key = deserialize_public_key(public_key_bytes)
+    except ValueError:
+        return False
+    r = int.from_bytes(signature[: PUBLIC_KEY_SIZE // 8 - 1], ENDIAN)
+    s = int.from_bytes(signature[PUBLIC_KEY_SIZE // 8 - 1 :], ENDIAN)
+    raw_signature = encode_dss_signature(r, s)
+    try:
+        public_key.verify(raw_signature, message, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
         return False
     return True
 
 
+def gen_key_pair() -> tuple[bytes, bytes]:
+    private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+    private_bytes = serialize_private_key(private_key)
+    public_key = private_key.public_key()
+    public_bytes = serialize_public_key(public_key)
+
+    return private_bytes, public_bytes
+
+
 def chain_len(block: "Block"):
-    if block is None:
-        return 0
-    x = 1
-    while block.prev is not None:
-        block = block.prev
+    x = 0
+    while block is not None:
         x += 1
+        block = block.prev
     return x
+
+
+def verified_subchain(chain: "Block") -> Optional["Block"]:
+    """A chain can potentially start with n blocks that are not verified yet.
+    This function will split the unverified part off and return the verified part."""
+    while chain is not None:
+        if block_is_ready(chain):
+            return chain
+        chain = chain.prev
+    return None
 
 
 def serialize_balances(balances: Dict[bytes, int]) -> bytes:
@@ -182,13 +235,18 @@ def serialize_balances(balances: Dict[bytes, int]) -> bytes:
 
 def deserialize_balances(raw: bytes) -> Dict[bytes, int]:
     return {
-        raw[i : i + KEY_SIZE // 8]: int.from_bytes(
+        raw[i : i + PUBLIC_KEY_SIZE // 8]: int.from_bytes(
             raw[
-                i + KEY_SIZE // 8 : i + KEY_SIZE // 8 + BALANCE_SERIALIZATION_VALUE_SIZE
+                i
+                + PUBLIC_KEY_SIZE // 8 : i
+                + PUBLIC_KEY_SIZE // 8
+                + BALANCE_SERIALIZATION_VALUE_SIZE
             ],
             ENDIAN,
         )
-        for i in range(0, len(raw), KEY_SIZE // 8 + BALANCE_SERIALIZATION_VALUE_SIZE)
+        for i in range(
+            0, len(raw), PUBLIC_KEY_SIZE // 8 + BALANCE_SERIALIZATION_VALUE_SIZE
+        )
     }
 
 
@@ -205,21 +263,30 @@ def execute_transaction(
 
 
 def full_verify(
-    block: "Block",
-    init_balance: Dict[bytes, int],
+    chain: "Block",
+    init_balances: Dict[bytes, int],
     val_reward: int,
     const_transaction_fee: int,
     relative_transaction_fee: float,
     valid_block_max_hash: int,
+    *,
+    _depth=0,
 ):
-    balances = init_balance.copy()
+    """Full verification run of a chain.
+    If _depth > 0, only verify the last _depth blocks, all blocks otherwise.
+    init_balances needs to be the balances at verification starting point.
+    With 0, that's the true init, with bigger than zero, it's balances after chain_len - n blocks.
+    """
+    balances = init_balances.copy()
     invalidated_uuids = set()
-    if block is None:
+    if chain is None:
         return True, balances, invalidated_uuids
-    if not is_valid_chain(block, valid_block_max_hash):
+    if not is_valid_chain(chain, valid_block_max_hash):
         return False, balances, invalidated_uuids
 
-    while block is not None:
+    for block in block_list(chain)[-max(_depth, 0) :]:
+        if len(block.transactions) != Block.SIZE:
+            return False, balances, invalidated_uuids
         for t in block.transactions:
             if not t.is_valid(
                 balances,
@@ -230,12 +297,18 @@ def full_verify(
                 return False, balances, invalidated_uuids
             execute_transaction(t, block.validator, balances, invalidated_uuids)
         balances[block.validator] = balances.get(block.validator, 0) + val_reward
-        block = block.prev
     return True, balances, invalidated_uuids
 
 
 class Transaction:
-    BYTE_COUNTS = [KEY_SIZE // 8, KEY_SIZE // 8, 8, 8, 8, KEY_SIZE // 8]
+    BYTE_COUNTS = [
+        PUBLIC_KEY_SIZE // 8,
+        PUBLIC_KEY_SIZE // 8,
+        8,
+        8,
+        8,
+        2 * (PUBLIC_KEY_SIZE // 8 - 1),
+    ]
     N_BYTES = sum(BYTE_COUNTS)
     CONVERSION_F = [
         LXX,
@@ -262,6 +335,21 @@ class Transaction:
         self.uuid = uuid
         self.signature = signature
 
+    @classmethod
+    def create(
+        cls, sender: bytes, receiver: bytes, amount: int, fee: int, private_key: bytes
+    ):
+        uuid = random.randbytes(Transaction.BYTE_COUNTS[4])
+        signature = sign_message(
+            sender
+            + receiver
+            + amount.to_bytes(Transaction.BYTE_COUNTS[2], ENDIAN)
+            + fee.to_bytes(Transaction.BYTE_COUNTS[3], ENDIAN)
+            + uuid,
+            private_key,
+        )
+        return cls(sender, receiver, amount, fee, uuid, signature)
+
     def _bytes_without_signature(self):
         amount = self.amount.to_bytes(Transaction.BYTE_COUNTS[2], ENDIAN)
         transaction_fee = self.fee.to_bytes(Transaction.BYTE_COUNTS[3], ENDIAN)
@@ -277,22 +365,20 @@ class Transaction:
         )
         amount_exceeds_fee = self.amount >= self.fee
         sender_not_receiver = self.sender != self.receiver
+
+        # check above conditions now because signature verification is expensive
+        conditions = (positive, correct_fee, amount_exceeds_fee, sender_not_receiver)
+        if not all(conditions):
+            return False
         signature_valid = verify_signature(
             self._bytes_without_signature(), self.signature, self.sender
         )
-        conditions = (
-            positive,
-            correct_fee,
-            amount_exceeds_fee,
-            sender_not_receiver,
-            signature_valid,
-        )
-        return all(conditions)
+        return signature_valid
 
     def is_valid(
         self,
-        balances: Dict[to_bytes, int],
-        invalidated_uuids: set[to_bytes],
+        balances: Dict[bytes, int],
+        invalidated_uuids: set[bytes],
         const_transaction_fee: int,
         relative_transaction_fee: float,
         transaction_sane: bool = None,
@@ -308,7 +394,7 @@ class Transaction:
         return all(conditions)
 
     @classmethod
-    def from_bytes(cls, raw: to_bytes):
+    def from_bytes(cls, raw: bytes):
         components = []
         cum_size = 0
         for size, cf in zip(Transaction.BYTE_COUNTS, Transaction.CONVERSION_F):
@@ -319,7 +405,9 @@ class Transaction:
 
 class Block:
     SIZE = 4
-    BYTE_COUNTS = [NONCE_SIZE_BYTES, 32, 512, 4] + [Transaction.N_BYTES] * SIZE
+    BYTE_COUNTS = [NONCE_SIZE_BYTES, 32, PUBLIC_KEY_SIZE // 8, 4] + [
+        Transaction.N_BYTES
+    ] * SIZE
     N_BYTES = sum(BYTE_COUNTS)
     CONVERSION_F = [
         lambda b: int.from_bytes(b, ENDIAN),
@@ -331,14 +419,14 @@ class Block:
     def __init__(
         self,
         transactions: List["Transaction"],
-        prev: "Block",
+        prev: Optional["Block"],
         validator: bytes,
         nonce: int = 0,
         version: int = 0,
     ):
         self.validator = validator
         self.transactions = transactions
-        self.prev = prev
+        self.prev: Union[Optional["Block"], bytes] = prev
         self.nonce = nonce
         self.version = version
         self._cache_hash = None
@@ -364,7 +452,7 @@ class Block:
         )
 
     @classmethod
-    def from_bytes(cls, raw: to_bytes):
+    def from_bytes(cls, raw: bytes):
         # NOTE: method assigns prev hash to prev member that should be Block object (gets linked externally)
         components = []
         cum_size = 0
@@ -400,14 +488,20 @@ class NonceMiningJobHandler:
         self.worker.start()
 
     def launch_job(
-        self, block: "Block", use_cuda_miner: bool, valid_block_max_hash: int
+        self,
+        block: "Block",
+        use_cuda_miner: bool,
+        valid_block_max_hash: int,
+        init_nonce: int = 1,
     ):
         _global_lock.acquire()
-        if any(b == block for b, _, _ in self.queued_jobs):
+        if any(b == block for b, _, _, _ in self.queued_jobs):
             _global_lock.release()
             self.kill()
             raise ValueError("a job has already been queued for this block")
-        self.queued_jobs.append((block, use_cuda_miner, valid_block_max_hash))
+        self.queued_jobs.append(
+            (block, use_cuda_miner, valid_block_max_hash, init_nonce)
+        )
         _global_lock.release()
 
     def kill(self):
@@ -417,16 +511,17 @@ class NonceMiningJobHandler:
     def __del__(self):
         self.kill()
 
+    @property
+    def is_mining(self):
+        return len(self.queued_jobs) > 0
+
     def _worker(self):
         while not self._killed.is_set():
             while not self.queued_jobs:
                 if self._killed.is_set():
                     return
                 thread_yield()
-            _global_lock.acquire()
-            job = self.queued_jobs.pop(0)
-            _global_lock.release()
-            block, use_cuda_miner, valid_block_max_hash = job
+            block, use_cuda_miner, valid_block_max_hash, init_nonce = self.queued_jobs[0]
             if block.nonce != 0:
                 raise ValueError(
                     "nonce already set to non-zero value, meaning it was already mined"
@@ -442,6 +537,7 @@ class NonceMiningJobHandler:
                     h,
                     valid_block_max_hash,
                     self._killed,
+                    init_nonce,
                 )
                 if nonce_out is not None:
                     block.nonce = nonce_out
@@ -451,14 +547,22 @@ class NonceMiningJobHandler:
                         )
             else:
                 block_ = Block(
-                    block.transactions, block.prev, block.validator, 1, block.version
+                    block.transactions,
+                    block.prev,
+                    block.validator,
+                    init_nonce,
+                    block.version,
                 )
                 while not self._killed.is_set() and not is_valid_block(
                     block_, valid_block_max_hash
                 ):
-                    block_.nonce += 1
+                    block_.nonce = (block_.nonce + 1) % (1 << (NONCE_SIZE_BYTES * 8))
                 if not self._killed.is_set():
                     block.nonce = block_.nonce
+
+            _global_lock.acquire()
+            self.queued_jobs.pop(0)
+            _global_lock.release()
 
 
 def chain_from_bytes(raw: bytes):
@@ -491,11 +595,7 @@ def chain_from_bytes(raw: bytes):
 
 
 def chain_to_bytes(chain: "Block") -> bytes:
-    out = b""
-    while chain is not None:
-        out += chain.to_bytes()
-        chain = chain.prev
-    return out
+    return b"".join(block.to_bytes() for block in reversed_block_list(chain))
 
 
 class OpenBlock:
@@ -538,10 +638,13 @@ class OpenBlock:
             return True, True
 
 
-def get_received_transactions(transaction_buffer, n: int):
+def get_received_transactions(
+    transaction_buffer, n: int
+) -> tuple[List["Transaction"], List[bytes]]:
     if transaction_buffer is None:
-        return []
+        return [], []
     out = []
+    out_bytes = []
     if isinstance(transaction_buffer, (queue.Queue, mp.queues.Queue)):
         while not transaction_buffer.empty() and n:
             try:
@@ -552,6 +655,7 @@ def get_received_transactions(transaction_buffer, n: int):
                 if len(raw) != Transaction.N_BYTES:
                     continue
                 out.append(Transaction.from_bytes(raw))
+                out_bytes.append(raw)
                 n -= 1
     else:
         while n and transaction_buffer:
@@ -559,14 +663,16 @@ def get_received_transactions(transaction_buffer, n: int):
             if len(raw) != Transaction.N_BYTES:
                 continue
             out.append(Transaction.from_bytes(raw))
+            out_bytes.append(raw)
             n -= 1
-    return out
+    return out, out_bytes
 
 
-def get_received_chains(chain_buffer, n: int):
+def get_received_chains(chain_buffer, n: int) -> tuple[List["Block"], List[bytes]]:
     if chain_buffer is None:
-        return []
+        return [], []
     out = []
+    out_bytes = []
     if isinstance(chain_buffer, (queue.Queue, mp.queues.Queue)):
         while not chain_buffer.empty() and n:
             try:
@@ -579,6 +685,7 @@ def get_received_chains(chain_buffer, n: int):
                 chain = chain_from_bytes(raw)
                 if chain is not None:
                     out.append(chain)
+                    out_bytes.append(raw)
                     n -= 1
     else:
         while n and chain_buffer:
@@ -588,14 +695,47 @@ def get_received_chains(chain_buffer, n: int):
             chain = chain_from_bytes(raw)
             if chain is not None:
                 out.append(chain)
+                out_bytes.append(raw)
                 n -= 1
-    return out
+    return out, out_bytes
 
 
-def broadcast_chain(broadcast_buffer, block: "Block"):
+def get_received_blocks(block_buffer, n: int) -> tuple[List["Block"], List[bytes]]:
+    if block_buffer is None:
+        return [], []
+    out = []
+    out_bytes = []
+    if isinstance(block_buffer, (queue.Queue, mp.queues.Queue)):
+        while not block_buffer.empty() and n:
+            try:
+                raw = block_buffer.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                if len(raw) != Block.N_BYTES:
+                    continue
+                block = Block.from_bytes(raw)
+                if block is not None and len(block.transactions) == Block.SIZE:
+                    out.append(block)
+                    out_bytes.append(raw)
+                    n -= 1
+    else:
+        while n and block_buffer:
+            raw = block_buffer.pop(0)
+            if len(raw) != Block.N_BYTES:
+                continue
+            block = chain_from_bytes(raw)
+            if block is not None and len(block.transactions) == Block.SIZE:
+                out.append(block)
+                out_bytes.append(raw)
+                n -= 1
+    return out, out_bytes
+
+
+def broadcast_chain(broadcast_buffer, block: "Block", broadcast_chain_as_bytes: bool):
     if broadcast_buffer is None:
         return
-    chain_bytes = chain_to_bytes(block)
+    chain_bytes = chain_to_bytes(block) if broadcast_chain_as_bytes else block
     if isinstance(broadcast_buffer, (queue.Queue, mp.queues.Queue)):
         try:
             broadcast_buffer.put_nowait(chain_bytes)
@@ -646,10 +786,11 @@ def _mine(
     chain: "Block" = None,
     transaction_recv_channel=None,
     chain_recv_channel=None,
+    block_recv_channel=None,
     chain_broadcast_channel=None,
     balance_broadcast_channel=None,
     side_channel=None,
-    init_balance=None,
+    init_balances=None,
     terminate_event=None,
     has_terminated_event=None,
     use_cuda_miner_event=None,
@@ -659,13 +800,16 @@ def _mine(
     const_transaction_fee: int = 0,
     relative_transaction_fee: float = 0.0,
     max_recv_chains_per_iter: int = -1,
+    max_recv_blocks_per_iter: int = -1,
     max_recv_transactions_per_iter: int = -1,
     collect_time: int = 0,
     copy_balances_on_broadcast=False,
     transaction_backlog_size: int = 1,
     broadcast_balances_as_bytes: bool = False,
-    valid_block_max_hash: int = 0x00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+    broadcast_chain_as_bytes: bool = False,
+    valid_block_max_hash: int = 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
     version: int = 0,
+    cuda_miner_load_args: Optional[tuple] = None,
 ):
     """
     The main blockchain function. It receives transactions and chains, verifies them, and updates the blockchain.
@@ -673,10 +817,11 @@ def _mine(
     :param chain: optional initial chain
     :param transaction_recv_channel: queue for receiving transactions
     :param chain_recv_channel: queue for receiving chains
+    :param block_recv_channel: queue for receiving blocks
     :param chain_broadcast_channel: queue for broadcasting new chains that a nonce was found for
     :param balance_broadcast_channel: queue for broadcasting balances for review
     :param side_channel: queue for broadcasting expensive to compute data that might be reused (eg chain validity)
-    :param init_balance: initial balance of the blockchain (what the balance is before the first transaction)
+    :param init_balances: initial balance of the blockchain (what the balance is before the first transaction)
     :param terminate_event: event set when the blockchain main loop should terminate
     :param has_terminated_event: event set when the blockchain main loop has terminated
     :param use_cuda_miner_event: event that signals that the miner should use the CUDA miner kernel instead of the debug miner
@@ -686,18 +831,24 @@ def _mine(
     :param const_transaction_fee: the constant transaction fee that is subtracted from the amount sent and given to the validator
     :param relative_transaction_fee: percentage (value between 0 and 1) of the amount sent that is given to the validator
     :param max_recv_chains_per_iter: how many alternative chains may be processed in one loop iteration (helps limit time / iter). negative value means no limit
+    :param max_recv_blocks_per_iter: how many blocks may be processed in one loop iteration (helps limit time / iter). negative value means no limit
     :param max_recv_transactions_per_iter: how many transactions may be processed in one loop iteration (helps limit time / iter). negative value means no limit
     :param collect_time: how many nanoseconds to wait and collect transactions before processing them (allows waiting for more transactions to arrive so miner can select the most valuable ones)
-    :param copy_balances_on_broadcast: whether to copy the balances dictionary when broadcasting it (helps prevent bugs by removing mutation coupling with blockchain core). Ignored if broadcast_balances_as_bytes is True.
+    :param copy_balances_on_broadcast: whether to copy the balances dictionary when broadcasting it. (helps prevent bugs by removing mutation coupling with blockchain core). Ignored if broadcast_balances_as_bytes is True.
     :param transaction_backlog_size: how many blocks' submitted transactions are stored in the backlog in case an alternative chain arrives (where those suddenly are valid)
     :param broadcast_balances_as_bytes: whether to broadcast balances as bytes or as a dictionary
+    :param broadcast_chain_as_bytes: whether to broadcast chains as bytes or as a Block object
     :param valid_block_max_hash: the max value of the hash (interpreted as integer) that makes a block valid
     :param version: the version of the blockchain (to allow for forks)
+    :param cuda_miner_load_args: Optional tuple or args used to (optionally) load a cuda miner on startup
     """
+    if cuda_miner_load_args is not None:
+        load_cuda_miner(*cuda_miner_load_args)
 
     assert isinstance(version, int), "version must be integer"
     assert transaction_backlog_size >= 0, "transaction_backlog_size cannot be negative"
     assert max_recv_chains_per_iter != 0, "max_recv_chains_per_iter cannot be 0"
+    assert max_recv_blocks_per_iter != 0, "max_recv_blocks_per_iter cannot be 0"
     assert (
         max_recv_transactions_per_iter != 0
     ), "max_recv_transactions_per_iter cannot be 0"
@@ -713,23 +864,15 @@ def _mine(
     assert (
         0 <= relative_transaction_fee < 1
     ), "relative transaction fee must be in [0, 1)"
-    assert len(validator) == KEY_SIZE // 8, "invalid validator public key size"
-    assert (
-        chain is None
-        or full_verify(
-            chain,
-            init_balance,
-            val_reward,
-            const_transaction_fee,
-            relative_transaction_fee,
-            valid_block_max_hash,
-        )[0]
-    ), "invalid initial chain"
+    assert len(validator) == PUBLIC_KEY_SIZE // 8, "invalid validator public key size"
     assert transaction_recv_channel is None or isinstance(
         transaction_recv_channel, (queue.Queue, mp.queues.Queue, list)
     )
     assert chain_recv_channel is None or isinstance(
         chain_recv_channel, (queue.Queue, mp.queues.Queue, list)
+    )
+    assert block_recv_channel is None or isinstance(
+        block_recv_channel, (queue.Queue, mp.queues.Queue, list)
     )
     assert chain_broadcast_channel is None or isinstance(
         chain_broadcast_channel, (queue.Queue, mp.queues.Queue, list)
@@ -740,7 +883,7 @@ def _mine(
     assert side_channel is None or isinstance(
         side_channel, (queue.Queue, mp.queues.Queue, list)
     )
-    assert init_balance is None or isinstance(init_balance, dict)
+    assert init_balances is None or isinstance(init_balances, dict)
     assert terminate_event is None or isinstance(
         terminate_event, (threading.Event, mp.synchronize.Event)
     )
@@ -761,26 +904,50 @@ def _mine(
     assert isinstance(copy_balances_on_broadcast, bool)
     assert isinstance(transaction_backlog_size, int)
     assert isinstance(broadcast_balances_as_bytes, bool)
+    assert isinstance(broadcast_chain_as_bytes, bool)
     assert isinstance(validator, bytes)
     assert isinstance(chain, Block) or chain is None
-    assert isinstance(init_balance, dict) or init_balance is None
+    assert isinstance(init_balances, dict) or init_balances is None
+
+    vsc = verified_subchain(chain)
+    init_chain_valid, balances, invalidated_uuids = full_verify(
+        vsc,
+        init_balances,
+        val_reward,
+        const_transaction_fee,
+        relative_transaction_fee,
+        valid_block_max_hash,
+    )
+    if not init_chain_valid:
+        raise RuntimeError("invalid initial chain provided")
 
     if RUN_WEAKNESS_DETECTION_WARNINGS:
         if val_reward != 0:
             print(HAS_VAL_REWARD_WARNING)
 
-    if init_balance is None:
-        init_balance = {}
-    open_block, balances, invalidated_uuids = (
-        OpenBlock(chain, validator),
-        init_balance,
-        set(),
-    )
+    if init_balances is None:
+        init_balances = {}
+
+    open_block = OpenBlock(chain, validator)
     transaction_backlog = [[]] * transaction_backlog_size
     mining_job_handler = NonceMiningJobHandler()
     updated_chain = False
     replaced_chain = False
     last_loop_time_ns = 0
+    last_block_balances = balances.copy()
+
+    unverified_blocks = []
+    i = chain
+    while i != vsc:
+        unverified_blocks.append(i)
+        i = i.prev
+    for i in reversed(unverified_blocks):
+        mining_job_handler.launch_job(
+            i,
+            use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
+            valid_block_max_hash,
+            int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
+        )
 
     while terminate_event is None or not terminate_event.is_set():
         while time.time_ns() - last_loop_time_ns < collect_time and (
@@ -791,14 +958,17 @@ def _mine(
         current_chain_len = chain_len(chain)
 
         # receive new chains
-        recv_chains = get_received_chains(chain_recv_channel, max_recv_chains_per_iter)
+        recv_chains, recv_chain_bytes = get_received_chains(
+            chain_recv_channel, max_recv_chains_per_iter
+        )
         favorite_new_chain_data = (None, None, None)
         max_trust_level = 0
-        for recv_chain in recv_chains:
+        for recv_chain, chain_bytes in zip(recv_chains, recv_chain_bytes):
+            recv_chain = verified_subchain(recv_chain)
             new_chain_len = chain_len(recv_chain)
             is_valid, new_balances, new_invalidated_uuids = full_verify(
                 recv_chain,
-                init_balance,
+                init_balances,
                 val_reward,
                 const_transaction_fee,
                 relative_transaction_fee,
@@ -808,7 +978,7 @@ def _mine(
                 broadcast_side_channel(
                     side_channel,
                     SideChannelItemType.CHAIN_VALIDITY_PAIR,
-                    (recv_chain.to_bytes(), is_valid),
+                    (chain_bytes, is_valid),
                 )
             # if chains are equivalent, trust them more than if the result is different
             if is_valid and (
@@ -831,14 +1001,73 @@ def _mine(
                 )
         if favorite_new_chain_data[0] is not None:
             chain, balances, invalidated_uuids = favorite_new_chain_data
+            last_block_balances = balances.copy()
             mining_job_handler.kill()
             mining_job_handler = NonceMiningJobHandler()
             open_block = OpenBlock(chain, validator)
             replaced_chain = True
             updated_chain = True
 
+        # receive new blocks (to reduce network traffic)
+        recv_blocks, recv_block_bytes = get_received_blocks(
+            block_recv_channel, max_recv_blocks_per_iter
+        )
+        for recv_block, block_bytes in zip(recv_blocks, recv_block_bytes):
+            # block hasn't been linked yet, so prev is just the hash not the block obj
+            prev_block_hash = recv_block.prev
+            if prev_block_hash != (
+                b"\0" * Block.BYTE_COUNTS[1] if chain is None else chain.hash()
+            ):
+                if side_channel is not None:
+                    broadcast_side_channel(
+                        side_channel,
+                        SideChannelItemType.BLOCK_VALIDITY_PAIR,
+                        (block_bytes, False),
+                    )
+                continue
+
+            fake_block = Block(None, None, None, None, None)
+            fake_block.hash = lambda: prev_block_hash
+            recv_block.prev = fake_block
+            is_valid, new_balances, new_invalidated_uuids = full_verify(
+                recv_block,
+                last_block_balances,
+                val_reward,
+                const_transaction_fee,
+                relative_transaction_fee,
+                valid_block_max_hash,
+                _depth=1,
+            )
+
+            if side_channel is not None:
+                broadcast_side_channel(
+                    side_channel,
+                    SideChannelItemType.BLOCK_VALIDITY_PAIR,
+                    (block_bytes, is_valid),
+                )
+            if is_valid:
+                recv_block.prev = chain
+                chain = recv_block
+                balances = new_balances
+                last_block_balances = balances.copy()
+                invalidated_uuids = new_invalidated_uuids
+                mining_job_handler.kill()
+                mining_job_handler = NonceMiningJobHandler()
+                open_block = OpenBlock(chain, validator)
+                replaced_chain = True
+                updated_chain = True
+
         # receive new transactions
-        recv_trans = get_received_transactions(
+        # TODO currently, I just get the received transactions and start mining when I have enough.
+        # This does not maximize mining reward, therefore, I should instead collect all received transactions into a
+        # set. Then, I should take the n biggest transactions from that set and mine with those.
+        # When new transactions arrive, I should check the value of the smallest transaction being mined and compare
+        # to the max in the set (the "transaction pool"). Then, if the min is less than the max, I should stop the
+        # mining process and re-select the transactions I am mining with. Also, I should only have one active mining job
+        # instead of multiple ones in a queue. On terminate, I could also write out the transaction pool through the
+        # side channel to preserve them (and add a new input argument for it).
+        # TODO convert OpenBlock into a transaction pool (see above TODO)
+        recv_trans, recv_trans_bytes = get_received_transactions(
             transaction_recv_channel, max_recv_transactions_per_iter
         )
         t_is_sane = [
@@ -846,27 +1075,32 @@ def _mine(
             for t in recv_trans
         ]
         if side_channel is not None:
-            for t, sane in zip(recv_trans, t_is_sane):
+            for t_bytes, sane in zip(recv_trans_bytes, t_is_sane):
                 if not sane:
                     broadcast_side_channel(
                         side_channel,
                         SideChannelItemType.TRANSACTION_VALIDITY_PAIR,
-                        (t.to_bytes(), False),
+                        (t_bytes, False),
                     )
-        filtered_recv_transactions = [
-            t for t, sane in zip(recv_trans, t_is_sane) if sane
+        filtered_recv_transactions_and_bytes = [
+            (t, t_bytes)
+            for t, t_bytes, sane in zip(recv_trans, recv_trans_bytes, t_is_sane)
+            if sane
         ]
-        recv_sane_transactions = sorted(
-            filtered_recv_transactions, key=lambda t: t.amount, reverse=True
+        # sorting transactions helps avoid incompatible chains due to different transaction orders
+        recv_sane_transactions_and_bytes = sorted(
+            filtered_recv_transactions_and_bytes,
+            key=lambda t_and_bytes: t_and_bytes[0].amount,
+            reverse=True,
         )
-        transactions = recv_sane_transactions
+        transactions = recv_sane_transactions_and_bytes
         if replaced_chain:
             transactions = sum(transaction_backlog, start=[]) + transactions
-        for t in transactions:
+        for transaction, t_bytes in transactions:
             if transaction_backlog_size:
-                transaction_backlog[-1].append(t)
+                transaction_backlog[-1].append(transaction)
             is_closed, is_valid_t = open_block.receive(
-                t,
+                transaction,
                 balances,
                 invalidated_uuids,
                 const_transaction_fee,
@@ -878,7 +1112,7 @@ def _mine(
                 broadcast_side_channel(
                     side_channel,
                     SideChannelItemType.TRANSACTION_VALIDITY_PAIR,
-                    (t.to_bytes(), is_valid_t),
+                    (t_bytes, is_valid_t),
                 )
             if is_closed:
                 # NOTE: sorting makes miner network more resilient against potential problems caused by blocks being
@@ -887,10 +1121,12 @@ def _mine(
                     open_block.transactions, key=lambda t: t.amount, reverse=True
                 )
                 chain = Block(sorted_transactions, chain, validator, version=version)
+                last_block_balances = balances.copy()
                 mining_job_handler.launch_job(
                     chain,
                     use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
                     valid_block_max_hash,
+                    int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
                 )
                 open_block = OpenBlock(chain, validator)
                 # remove those that were just closed
@@ -898,11 +1134,11 @@ def _mine(
                 transaction_backlog.append([])
                 updated_chain = True
 
-        if updated_chain and chain_is_ready(chain):
-            broadcast_chain(chain_broadcast_channel, chain)
+        if updated_chain and block_is_ready(chain):
+            broadcast_chain(chain_broadcast_channel, chain, broadcast_chain_as_bytes)
             broadcast_balances(
                 balance_broadcast_channel,
-                balances,
+                last_block_balances,
                 copy_balances_on_broadcast,
                 broadcast_balances_as_bytes,
             )
@@ -922,12 +1158,14 @@ class MiningConfig:
         const_transaction_fee: int = 0,
         relative_transaction_fee: float = 0.0,
         max_recv_chains_per_iter: int = 1,
-        max_recv_transactions_per_iter: int = 4,
+        max_recv_blocks_per_iter: int = 1,
+        max_recv_transactions_per_iter: int = Block.SIZE,
         collect_time: int = 0,
         copy_balances_on_broadcast: bool = True,
         transaction_backlog_size: int = 2,
         broadcast_balances_as_bytes: bool = True,
-        valid_block_max_hash: int = 0x00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+        broadcast_chain_as_bytes: bool = True,
+        valid_block_max_hash: int = 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
         version: int = 0,
     ):
         self.incompatible_chain_distrust = incompatible_chain_distrust
@@ -936,11 +1174,13 @@ class MiningConfig:
         self.const_transaction_fee = const_transaction_fee
         self.relative_transaction_fee = relative_transaction_fee
         self.max_recv_chains_per_iter = max_recv_chains_per_iter
+        self.max_recv_blocks_per_iter = max_recv_blocks_per_iter
         self.max_recv_transactions_per_iter = max_recv_transactions_per_iter
         self.collect_time = collect_time
         self.copy_balances_on_broadcast = copy_balances_on_broadcast
         self.transaction_backlog_size = transaction_backlog_size
         self.broadcast_balances_as_bytes = broadcast_balances_as_bytes
+        self.broadcast_chain_as_bytes = broadcast_chain_as_bytes
         self.valid_block_max_hash = valid_block_max_hash
         self.version = version
 
@@ -956,20 +1196,22 @@ class Miner:
         self,
         validator: bytes,
         chain: "Block" = None,
-        init_balance=None,
+        init_balances=None,
         config: MiningConfig = None,
         run_with: str = "direct",
+        start_immediately: bool = True,
     ):
         super().__init__()
         self.validator = validator
         self.chain = chain
-        self.init_balance = init_balance.copy() if init_balance is not None else {}
+        self.init_balances = init_balances.copy() if init_balances is not None else {}
         if config is None:
             config = MiningConfig()
 
         if run_with == "threading":
             self.transaction_recv_buffer = queue.Queue()
             self.chain_recv_buffer = queue.Queue()
+            self.block_recv_buffer = queue.Queue()
             self.chain_broadcast_buffer = queue.Queue(1)
             self.balance_broadcast_buffer = queue.Queue(1)
             self.side_channel = queue.Queue()
@@ -979,6 +1221,7 @@ class Miner:
         elif run_with == "mp":
             self.transaction_recv_buffer = mp.Queue()
             self.chain_recv_buffer = mp.Queue()
+            self.block_recv_buffer = mp.Queue()
             self.chain_broadcast_buffer = mp.Queue(1)
             self.balance_broadcast_buffer = mp.Queue(1)
             self.side_channel = mp.Queue()
@@ -988,14 +1231,12 @@ class Miner:
         else:
             self.transaction_recv_buffer = queue.Queue()
             self.chain_recv_buffer = queue.Queue()
+            self.block_recv_buffer = queue.Queue()
             self.chain_broadcast_buffer = queue.Queue(1)
             self.balance_broadcast_buffer = queue.Queue(1)
             self.side_channel = queue.Queue()
             self.terminate_event = threading.Event()
             self.use_cuda_miner_event = threading.Event()
-
-        self._chain_queue_offload_queue = []
-        self._transaction_queue_offload_queue = []
 
         self.incompatible_chain_distrust = config.incompatible_chain_distrust
         self.compatible_chain_distrust = config.compatible_chain_distrust
@@ -1003,27 +1244,37 @@ class Miner:
         self.const_transaction_fee = config.const_transaction_fee
         self.relative_transaction_fee = config.relative_transaction_fee
         self.max_recv_chains_per_iter = config.max_recv_chains_per_iter
+        self.max_recv_blocks_per_iter = config.max_recv_blocks_per_iter
         self.max_recv_transactions_per_iter = config.max_recv_transactions_per_iter
         self.collect_time = config.collect_time
         self.copy_balances_on_broadcast = config.copy_balances_on_broadcast
         self.transaction_backlog_size = config.transaction_backlog_size
         self.broadcast_balances_as_bytes = config.broadcast_balances_as_bytes
+        self.broadcast_chain_as_bytes = config.broadcast_chain_as_bytes
         self.valid_block_max_hash = config.valid_block_max_hash
         self.version = config.version
 
         self.run_with = run_with
-        self._get_balances_last = self.init_balance
-        self._get_chain_last = self.chain
-
-        args = (
+        self._get_balances_last = (
+            serialize_balances(self.init_balances)
+            if self.broadcast_balances_as_bytes
+            else self.init_balances
+        )
+        self._get_chain_last = (
+            chain_to_bytes(self.chain)
+            if self.broadcast_chain_as_bytes and self.chain is not None
+            else b"" if self.broadcast_chain_as_bytes else self.chain
+        )
+        self.args = (
             self.validator,
             self.chain,
             self.transaction_recv_buffer,
             self.chain_recv_buffer,
+            self.block_recv_buffer,
             self.chain_broadcast_buffer,
             self.balance_broadcast_buffer,
             self.side_channel,
-            self.init_balance,
+            self.init_balances,
             self.terminate_event,
             self.has_terminated_event,
             self.use_cuda_miner_event,
@@ -1033,33 +1284,57 @@ class Miner:
             self.const_transaction_fee,
             self.relative_transaction_fee,
             self.max_recv_chains_per_iter,
+            self.max_recv_blocks_per_iter,
             self.max_recv_transactions_per_iter,
             self.collect_time,
             self.copy_balances_on_broadcast,
             self.transaction_backlog_size,
             self.broadcast_balances_as_bytes,
+            self.broadcast_chain_as_bytes,
             self.valid_block_max_hash,
             self.version,
+            (
+                _cuda_miner_load_callback_args
+                if run_with == "mp" or _cuda_miner_mod is None
+                else None
+            ),
         )
+        self.started = start_immediately
         if run_with == "direct":
-            _mine(*args)
+            if start_immediately:
+                _mine(*self.args)
         elif run_with == "threading":
-            self._thread = threading.Thread(target=_mine, args=args)
-            self._thread.start()
+            self._thread = threading.Thread(target=_mine, daemon=True, args=self.args)
+            if start_immediately:
+                self._thread.start()
         elif run_with == "mp":
-            self._process = mp.Process(target=_mine, args=args)
-            self._process.start()
+            self._process = mp.Process(target=_mine, daemon=True, args=self.args)
+            if start_immediately:
+                self._process.start()
         else:
             raise ValueError(
                 "invalid run_with value: run_with must be one of ('direct', 'threading', 'mp')"
             )
+
+    def start(self):
+        if self.started:
+            raise RuntimeError("Miner already started")
+        elif self.run_with == "direct":
+            _mine(*self.args)
+        elif self.run_with == "threading":
+            self._thread.start()
+        else:
+            self._process.start()
 
     def to_bytes(self):
         return self.validator + chain_to_bytes(self.chain)
 
     @classmethod
     def from_bytes(cls, raw: bytes, **kwargs):
-        validator, chain_bytes = raw[: KEY_SIZE // 8], raw[KEY_SIZE // 8 :]
+        validator, chain_bytes = (
+            raw[: PUBLIC_KEY_SIZE // 8],
+            raw[PUBLIC_KEY_SIZE // 8 :],
+        )
         chain = chain_from_bytes(chain_bytes)
         return cls(validator, chain, **kwargs)
 
@@ -1107,27 +1382,14 @@ class Miner:
         self.kill(True)
         return final_chain, final_balances
 
-    @staticmethod
-    def _safe_add_to_queue(item, q, offload_queue):
-        try:
-            if offload_queue:
-                q.put_nowait(offload_queue.pop(0))
-            else:
-                q.put_nowait(item)
-        except queue.Full:
-            offload_queue.append(item)
-
     def add_transaction(self, transaction: bytes):
-        self._safe_add_to_queue(
-            transaction,
-            self.transaction_recv_buffer,
-            self._transaction_queue_offload_queue,
-        )
+        self.transaction_recv_buffer.put_nowait(transaction)
 
     def add_chain(self, chain: bytes):
-        self._safe_add_to_queue(
-            chain, self.chain_recv_buffer, self._chain_queue_offload_queue
-        )
+        self.chain_recv_buffer.put_nowait(chain)
+
+    def add_block(self, block: bytes):
+        self.block_recv_buffer.put_nowait(block)
 
     def get_balances(self) -> Optional[Union[bytes, Dict[bytes, int]]]:
         out = None
@@ -1156,16 +1418,3 @@ class Miner:
 
     def use_debug_miner(self):
         self.use_cuda_miner_event.clear()
-
-
-def gen_key_pair() -> tuple[bytes, bytes]:
-    """
-    Generate a key pair using RSA with 65537 as the public exponent and KEY_SIZE as the key size.
-    :return: (private_key_bytes, public_key_bytes)
-    """
-    private_key = rsa.generate_private_key(65537, KEY_SIZE)
-    private_bytes = serialize_private_key(private_key)
-    public_key = private_key.public_key()
-    public_bytes = serialize_public_key(public_key)
-
-    return private_bytes, public_bytes

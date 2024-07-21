@@ -13,7 +13,7 @@
 <body>
 <h1>Miner Public Key</h1>
 <p>
-    {% for vi in range(len(validator) // VALIDATOR_CHARS_PER_LINE) %}
+    {% for vi in range((len(validator) + VALIDATOR_CHARS_PER_LINE - 1) // VALIDATOR_CHARS_PER_LINE) %}
         {{ validator[VALIDATOR_CHARS_PER_LINE * vi:(vi + 1) * VALIDATOR_CHARS_PER_LINE] }}<br>
     {% endfor %}
 </p>
@@ -23,15 +23,21 @@
 
     <li><a href="/submit-transaction-hex">Submit Transaction in hexadecimal format</a></li>
     <li><a href="/submit-chain-hex">Submit Chain in hexadecimal format</a></li>
+    <li><a href="/submit-block-hex">Submit Block in hexadecimal format</a></li>
     <li><a href="/get-chain-hex">Get Chain in hexadecimal format</a></li>
+    <li><a href="/get-last-block-hex">Get last Block in hexadecimal format</a></li>
     <li><a href="/get-balances-hex">Get Balances in hexadecimal format</a></li>
     <li><a href="/get-balances-hex-json">Get Balances in hexadecimal format in JSON</a></li>
+    <li><a href="/get-validity-hex">Get the validity of submitted data from its hash in hexadecimal format</a></li>
 
     <li><a href="/submit-transaction">Submit Transaction</a></li>
     <li><a href="/submit-chain">Submit Chain</a></li>
+    <li><a href="/submit-block">Submit Block</a></li>
     <li><a href="/get-chain">Get Chain</a></li>
+    <li><a href="/get-last-block">Get last Block</a></li>
     <li><a href="/get-balances">Get Balances</a></li>
     <li><a href="/get-balances-json">Get Balances in JSON</a></li>
+    <li><a href="/get-validity">Get the validity of submitted data from its hash</a></li>
 
     <li><a href="/register-as-other-miner">Register as other miner</a></li>
 </ul>

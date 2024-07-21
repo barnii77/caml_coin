@@ -201,7 +201,7 @@ __device__ void cuda_sha256_final(CUDA_SHA256_CTX *ctx, BYTE hash[]) {
 
 /// checks if a 256 bit little endian integer is less than another
 __forceinline__ __device__ bool cuda_u256_lte(uint256_t a, uint256_t b) {
-#pragma unroll sizeof(uint256_t) / sizeof(WORD)
+#pragma unroll 8
     for (int i = sizeof(uint256_t) / sizeof(WORD) - 1; i >= 0; i--) {
         WORD a_ = ((WORD *) &a)[i], b_ = ((WORD *) &b)[i];
         // NOTE: first checking a_ > b_ is more efficient because most nonces are
@@ -213,25 +213,12 @@ __forceinline__ __device__ bool cuda_u256_lte(uint256_t a, uint256_t b) {
     return true;
 }
 
-__forceinline__ __device__ bool cuda_uint128_eq0(uint128_t const *x) {
-#pragma unroll sizeof(uint128_t) / sizeof(WORD)
-    for (int i = 0; i < sizeof(uint128_t) / sizeof(WORD); i++) {
-        if (((WORD *)x)[i] != 0) return false;
-    }
-    return true;
-}
-
 __forceinline__ __device__ void cuda_uint128_add(uint128_t const *a, uint128_t const *b, uint128_t *out) {
     WORD carry = 0, a_, b_, sum;
-#pragma unroll sizeof(uint128_t) / sizeof(WORD)
+#pragma unroll 4
     for (int i = 0; i < sizeof(uint128_t) / sizeof(WORD); i++) {
         a_ = ((WORD *) a)[i], b_ = ((WORD *) b)[i];
         sum = a_ + b_ + carry;
-        // TODO I discovered an nvrtc compiler bug here: investigate
-//        if (threadIdx.x == 0 && blockIdx.x == 0 && i == 0) printf("carry = %u\n%u + %u = %u\n%u + %u + %u = %u\n\n", carry, a_, b_, a_ + b_, a_, b_, carry, a_ + b_ + carry);
-//        if (threadIdx.x == 0 && blockIdx.x == 0 && i == 0) printf("tempsum = %u\n", sum);
-//        sum += carry;
-        if (threadIdx.x == 0 && blockIdx.x == 0 && i == 0) printf("sum = %u\n", sum);
         ((WORD *)out)[i] = sum;
         carry = (a_ < sum) | (b_ < sum);
     }
@@ -259,7 +246,7 @@ extern "C" __global__ void mine_sha256(const BYTE const_in[SHA256_BLOCK_SIZE],
 #else                               // put it into thread-local registers
     uint256_t _max_valid_hash;
     // populate _max_valid_hash
-#pragma unroll(SHA256_BLOCK_SIZE / sizeof(WORD))
+#pragma unroll 8
     for (int i = 0; i < SHA256_BLOCK_SIZE / sizeof(WORD); i++) {
         ((WORD *)&_max_valid_hash)[i] = ((WORD *)max_valid_hash)[i];
     }
@@ -291,7 +278,7 @@ extern "C" __global__ void mine_sha256(const BYTE const_in[SHA256_BLOCK_SIZE],
 
     BYTE in[sizeof(uint128_t) +
             SHA256_BLOCK_SIZE];  // nonce + const_in = 384 bytes
-#pragma unroll SHA256_BLOCK_SIZE / sizeof(WORD)
+#pragma unroll 8
     for (int i = 0; i < SHA256_BLOCK_SIZE / sizeof(WORD); i++) {
         ((WORD *) in)[i + sizeof(uint128_t) / sizeof(WORD)] = ((WORD *) const_in)[i];
     }
@@ -299,19 +286,25 @@ extern "C" __global__ void mine_sha256(const BYTE const_in[SHA256_BLOCK_SIZE],
     uint256_t out;
     CUDA_SHA256_CTX ctx;
     bool success = false;
-    for (; cuda_uint128_eq0((uint128_t *) nonce_out);
-           cuda_uint128_add(&nonce, &_nonce_step_size, &nonce)) {
+
+    // !!!!!!!!!!!
+    // NOTE: this looks like it could be a for-loop, but that will cause the compiler to generate bad machine code.
+    // This bad machine code will then confuse the GPU branching model so bad that the miner completely breaks down.
+    // Don't try it, it took me 3 days and the help of a friend to figure this out.
+    // !!!!!!!!!!!
+    while (1) {
         // write nonce to first bytes of in
         *((uint128_t *) in) = nonce;
         // sha256 with little endian output
         cuda_sha256_init(&ctx);
         cuda_sha256_update(&ctx, in, sizeof(in));
-        cuda_sha256_final(&ctx, (BYTE *) (BYTE *)&out);
+        cuda_sha256_final(&ctx, (BYTE *)&out);
         // check if nonce is valid
         if (cuda_u256_lte(out, _max_valid_hash)) {
             success = atomicCAS((WORD *) nonce_out, 0, 1) == 0;
-            break;
         }
+        if (*nonce_out != 0) break;
+        cuda_uint128_add(&nonce, &_nonce_step_size, &nonce);
     }
 
     // without syncthreads, if another thread was just doing the atomicCAS and I
