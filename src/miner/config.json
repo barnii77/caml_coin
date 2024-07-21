@@ -1,0 +1,7 @@
+{
+  "init_balances": {
+    "035ac00bee51e36c1cc27f314d85903c2005c01b00c4113d26e0fbcb93630872b8": 10000000
+  },
+  "version": 0,
+  "cuda": true
+}
