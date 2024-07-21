@@ -189,7 +189,11 @@ class KernelTemplate:
         else:
             if self.code is not None:
                 nvrtc_options = (
-                    tuple(self.code[len("// NVRTC-OPTIONS: "): self.code.find("\n")].split())
+                    tuple(
+                        self.code[
+                            len("// NVRTC-OPTIONS: ") : self.code.find("\n")
+                        ].split()
+                    )
                     if self.code.startswith("// NVRTC-OPTIONS: ")
                     else ()
                 )

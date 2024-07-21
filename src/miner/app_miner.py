@@ -26,6 +26,7 @@ from flask import Flask, request, render_template, redirect, url_for
 
 # TODO figure out how to dynamically adjust the valid_block_max_hash (difficulty)
 
+x_client_port = "x-client-port"
 _chain_time_cache = {}
 _block_time_cache = {}
 _transaction_time_cache = {}
@@ -89,9 +90,11 @@ def add_miner_response_sample(sender, sample):
 
 
 def _broadcast_to_miner(m: str, data: bytes, route: str):
-    print("broadcasting to", m)
+    print("broadcasting to", m, "/", route)
     try:
-        requests.post(f"http://{m}/{route}", data=data, timeout=REQUEST_TIMEOUT)
+        requests.post(
+            f"http://{m}/{route}", data=data, timeout=REQUEST_TIMEOUT, headers=headers
+        )
     except requests.exceptions.RequestException:
         # TODO use add_miner_response_sample
         _miner_n_non_responsive[m] = _miner_n_non_responsive.get(m, 0) + 1
@@ -172,9 +175,13 @@ def register_new_validities():
         _temporary_blacklist[sender] = time.time()
 
     def request_full_chain(sender):
-        print("trying to get full chain")
+        print("trying to get full chain from", sender, headers)
         try:
-            chain = requests.get(f"http://{sender}/get-chain", timeout=REQUEST_TIMEOUT).content
+            chain = requests.get(
+                f"http://{sender}/get-chain-hex",
+                timeout=REQUEST_TIMEOUT,
+                headers=headers,
+            ).content
         except requests.exceptions.RequestException:
             if sender in other_miners:
                 # TODO use add_miner_response_sample
@@ -187,8 +194,9 @@ def register_new_validities():
         try:
             requests.post(
                 f"http://localhost:{args.port}/submit-chain",
-                data=chain,
+                data=chain.decode("latin-1"),
                 timeout=REQUEST_TIMEOUT,
+                headers=headers,
             )
         except requests.exceptions.RequestException:
             pass
@@ -213,10 +221,22 @@ def register_new_validities():
         item = miner.get_side_channel_item()
 
 
+def get_full_sender_ip():
+    return request.remote_addr + (
+        ":" + request.headers.get(x_client_port, "")
+        if x_client_port in request.headers
+        else ""
+    )
+
+
+def map_hash_to_sender_ip(data: bytes):
+    _hash_to_sender.setdefault(blockchain.sha256(data), get_full_sender_ip())
+
+
 # TODO these functions currently broadcast to miners, but let the callbacks do that once I am sure something is valid
 # this is so I avoid being blacklisted by everyone
 def add_chain(chain: bytes):
-    _hash_to_sender.setdefault(blockchain.sha256(chain), request.remote_addr)
+    map_hash_to_sender_ip(chain)
     if chain not in _chain_time_cache:
         miner.add_chain(chain)
         _chain_time_cache[chain] = time.time()
@@ -224,7 +244,7 @@ def add_chain(chain: bytes):
 
 
 def add_block(block: bytes):
-    _hash_to_sender.setdefault(blockchain.sha256(block), request.remote_addr)
+    map_hash_to_sender_ip(block)
     if block not in _block_time_cache:
         miner.add_block(block)
         _block_time_cache[block] = time.time()
@@ -232,7 +252,7 @@ def add_block(block: bytes):
 
 
 def add_transaction(transaction: bytes):
-    _hash_to_sender.setdefault(blockchain.sha256(transaction), request.remote_addr)
+    map_hash_to_sender_ip(transaction)
     if transaction not in _transaction_time_cache:
         miner.add_transaction(transaction)
         _transaction_time_cache[transaction] = time.time()
@@ -244,12 +264,18 @@ def disallow_blacklisted(func):
     def wrapper():
         if request.remote_addr not in _temporary_blacklist:
             return func()
-        return redirect(url_for("route_blacklisted")), 403
+        return redirect(url_for("route_blacklisted")), 302
 
     return wrapper
 
 
 app = Flask(__name__)
+
+
+@app.after_request
+def attach_port(response):
+    response.headers[x_client_port] = str(args.port)
+    return response
 
 
 @app.route("/")
@@ -275,7 +301,7 @@ def shutdown():
         password = request.form.get("password", request.data.decode("utf-8"))
         pw_hash = hashlib.sha256((password + shutdown_pw_salt).encode()).hexdigest()
         if pw_hash != shutdown_pw_hash:
-            return redirect("/shutdown"), 403
+            return redirect("/shutdown"), 302
         save_data_switch.clear()  # avoid race condition with automatic chain saving
         chain, _ = miner.finish()
         if chain is not None:
@@ -299,7 +325,7 @@ def submit_transaction_hex():
             else bytes.fromhex(str(request.data))
         )
         add_transaction(transaction)
-        return redirect(url_for("index")), 200
+        return redirect(url_for("index")), 302
 
 
 @app.route("/submit-chain-hex", methods=["GET", "POST"])
@@ -314,7 +340,7 @@ def submit_chain_hex():
             else bytes.fromhex(str(request.data))
         )
         add_chain(chain)
-        return redirect(url_for("index")), 200
+        return redirect(url_for("index")), 302
 
 
 @app.route("/submit-block-hex", methods=["GET", "POST"])
@@ -329,7 +355,7 @@ def submit_block_hex():
             else bytes.fromhex(str(request.data))
         )
         add_block(block)
-        return redirect(url_for("index")), 200
+        return redirect(url_for("index")), 302
 
 
 @app.route("/get-chain-hex", methods=["GET"])
@@ -546,6 +572,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cuda", action="store_true", help="Use CUDA for mining")
     args = parser.parse_args()
+    headers = {x_client_port: str(args.port)}
     if args.cuda:
         config["cuda"] = True
     if config.get("cuda", False):

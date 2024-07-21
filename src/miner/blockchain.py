@@ -521,7 +521,9 @@ class NonceMiningJobHandler:
                 if self._killed.is_set():
                     return
                 thread_yield()
-            block, use_cuda_miner, valid_block_max_hash, init_nonce = self.queued_jobs[0]
+            block, use_cuda_miner, valid_block_max_hash, init_nonce = self.queued_jobs[
+                0
+            ]
             if block.nonce != 0:
                 raise ValueError(
                     "nonce already set to non-zero value, meaning it was already mined"
