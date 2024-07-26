@@ -216,6 +216,14 @@ def chain_len(block: "Block"):
     return x
 
 
+def get_n_unready_blocks(chain: "Block"):
+    i = 0
+    while not block_is_ready(chain):
+        i += 1
+        chain = chain.prev
+    return i
+
+
 def verified_subchain(chain: "Block") -> Optional["Block"]:
     """A chain can potentially start with n blocks that are not verified yet.
     This function will split the unverified part off and return the verified part."""
@@ -254,12 +262,12 @@ def execute_transaction(
     t: "Transaction",
     validator: bytes,
     balances: Dict[bytes, int],
-    invalidated_uuids: set[bytes],
+    invalidated_timestamps: set[bytes],
 ):
-    balances[t.sender] = balances.get(t.sender, 0) - t.amount
-    balances[t.receiver] = balances.get(t.receiver, 0) + t.amount - t.fee
+    balances[t.sender] = balances.get(t.sender, 0) - t.amount - t.fee
+    balances[t.receiver] = balances.get(t.receiver, 0) + t.amount
     balances[validator] = balances.get(validator, 0) + t.fee
-    invalidated_uuids.add(t.uuid)
+    invalidated_timestamps.add(t.timestamp)
 
 
 def full_verify(
@@ -269,41 +277,68 @@ def full_verify(
     const_transaction_fee: int,
     relative_transaction_fee: float,
     valid_block_max_hash: int,
+    max_timestamp_now_diff: int,
     *,
     _depth=0,
 ):
-    """Full verification run of a chain.
+    """
+    Full verification run of a chain.
     If _depth > 0, only verify the last _depth blocks, all blocks otherwise.
     init_balances needs to be the balances at verification starting point.
     With 0, that's the true init, with bigger than zero, it's balances after chain_len - n blocks.
     """
     balances = init_balances.copy()
-    invalidated_uuids = set()
-    if chain is None:
-        return True, balances, invalidated_uuids
-    if not is_valid_chain(chain, valid_block_max_hash):
-        return False, balances, invalidated_uuids
+    min_timestamp_values = []
+    min_ts_running_min = 1 << 65
+    for block in reversed_block_list(chain)[: _depth if _depth > 0 else None]:
+        min_ts_running_min = min(
+            min_ts_running_min,
+            min(
+                map(
+                    lambda transaction: int.from_bytes(transaction.timestamp, ENDIAN),
+                    block.transactions,
+                )
+            ),
+        )
+        min_timestamp_values.insert(0, min_ts_running_min)
 
-    for block in block_list(chain)[-max(_depth, 0) :]:
+    invalidated_timestamps = set()
+    if chain is None:
+        return True, balances, invalidated_timestamps
+    if not is_valid_chain(chain, valid_block_max_hash):
+        return False, balances, invalidated_timestamps
+
+    for i, block in enumerate(block_list(chain)[-max(_depth, 0) :]):
         if len(block.transactions) != Block.SIZE:
-            return False, balances, invalidated_uuids
+            return False, balances, invalidated_timestamps
         for t in block.transactions:
             if not t.is_valid(
                 balances,
-                invalidated_uuids,
+                invalidated_timestamps,
                 const_transaction_fee,
                 relative_transaction_fee,
+                None,
+                max_timestamp_now_diff,
             ):
-                return False, balances, invalidated_uuids
-            execute_transaction(t, block.validator, balances, invalidated_uuids)
+                return False, balances, invalidated_timestamps
+            execute_transaction(t, block.validator, balances, invalidated_timestamps)
         balances[block.validator] = balances.get(block.validator, 0) + val_reward
-    return True, balances, invalidated_uuids
+        # filter invalidated timestamps
+        invalidated_timestamps = set(
+            filter(
+                lambda timestamp: int.from_bytes(timestamp, ENDIAN)
+                >= min_timestamp_values[i],
+                invalidated_timestamps,
+            )
+        )
+    return True, balances, invalidated_timestamps
 
 
 class Transaction:
     BYTE_COUNTS = [
         PUBLIC_KEY_SIZE // 8,
         PUBLIC_KEY_SIZE // 8,
+        8,
         8,
         8,
         8,
@@ -317,6 +352,7 @@ class Transaction:
         lambda b: int.from_bytes(b, ENDIAN),
         LXX,
         LXX,
+        LXX,
     ]
 
     def __init__(
@@ -325,72 +361,95 @@ class Transaction:
         receiver: bytes,
         amount: int,
         fee: int,
-        uuid: bytes,
+        timestamp: bytes,
+        recv_time: bytes,
         signature: bytes,
     ):
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
         self.fee = fee
-        self.uuid = uuid
+        self.timestamp = timestamp
+        self.recv_time = recv_time
         self.signature = signature
 
     @classmethod
     def create(
-        cls, sender: bytes, receiver: bytes, amount: int, fee: int, private_key: bytes
+        cls,
+        sender: bytes,
+        receiver: bytes,
+        amount: int,
+        fee: int,
+        recv_time: bytes,
+        private_key: bytes,
     ):
-        uuid = random.randbytes(Transaction.BYTE_COUNTS[4])
+        timestamp_bytes = time.time_ns().to_bytes(Transaction.BYTE_COUNTS[4])
         signature = sign_message(
             sender
             + receiver
             + amount.to_bytes(Transaction.BYTE_COUNTS[2], ENDIAN)
             + fee.to_bytes(Transaction.BYTE_COUNTS[3], ENDIAN)
-            + uuid,
+            + timestamp_bytes,
             private_key,
         )
-        return cls(sender, receiver, amount, fee, uuid, signature)
+        return cls(sender, receiver, amount, fee, timestamp_bytes, recv_time, signature)
 
-    def _bytes_without_signature(self):
+    def verify_signature_input(self):
         amount = self.amount.to_bytes(Transaction.BYTE_COUNTS[2], ENDIAN)
         transaction_fee = self.fee.to_bytes(Transaction.BYTE_COUNTS[3], ENDIAN)
-        return self.sender + self.receiver + amount + transaction_fee + self.uuid
+        return self.sender + self.receiver + amount + transaction_fee + self.timestamp
 
     def to_bytes(self):
-        return self._bytes_without_signature() + self.signature
+        amount = self.amount.to_bytes(Transaction.BYTE_COUNTS[2], ENDIAN)
+        transaction_fee = self.fee.to_bytes(Transaction.BYTE_COUNTS[3], ENDIAN)
+        return (
+            self.sender
+            + self.receiver
+            + amount
+            + transaction_fee
+            + self.timestamp
+            + self.recv_time
+            + self.signature
+        )
 
     def is_sane(self, const_transaction_fee: int, relative_transaction_fee: float):
-        positive = self.amount > 0
-        correct_fee = self.fee == const_transaction_fee + int(
+        positive = self.amount >= 0 and self.fee >= 0
+        valid_fee = self.fee >= const_transaction_fee + int(
             self.amount * relative_transaction_fee
         )
-        amount_exceeds_fee = self.amount >= self.fee
         sender_not_receiver = self.sender != self.receiver
 
         # check above conditions now because signature verification is expensive
-        conditions = (positive, correct_fee, amount_exceeds_fee, sender_not_receiver)
+        conditions = (positive, valid_fee, sender_not_receiver)
         if not all(conditions):
             return False
         signature_valid = verify_signature(
-            self._bytes_without_signature(), self.signature, self.sender
+            self.verify_signature_input(), self.signature, self.sender
         )
         return signature_valid
 
     def is_valid(
         self,
         balances: Dict[bytes, int],
-        invalidated_uuids: set[bytes],
+        invalidated_timestamps: set[bytes],
         const_transaction_fee: int,
         relative_transaction_fee: float,
         transaction_sane: bool = None,
+        max_timestamp_now_diff: int = -1,
     ):
-        can_afford = balances.get(self.sender, 0) > self.amount > 0
-        uuid_valid = self.uuid not in invalidated_uuids
+        can_afford = balances.get(self.sender, 0) > self.amount + self.fee > 0
+        timestamp_valid = (
+            max_timestamp_now_diff == -1
+            or int.from_bytes(self.recv_time, ENDIAN)
+            - int.from_bytes(self.timestamp, ENDIAN)
+            <= max_timestamp_now_diff
+        ) and self.timestamp not in invalidated_timestamps
         is_sane = (
             self.is_sane(const_transaction_fee, relative_transaction_fee)
             if transaction_sane is None
             else transaction_sane
         )
-        conditions = (can_afford, uuid_valid, is_sane)
+        conditions = (can_afford, timestamp_valid, is_sane)
         return all(conditions)
 
     @classmethod
@@ -405,7 +464,7 @@ class Transaction:
 
 class Block:
     SIZE = 4
-    BYTE_COUNTS = [NONCE_SIZE_BYTES, 32, PUBLIC_KEY_SIZE // 8, 4] + [
+    BYTE_COUNTS = [NONCE_SIZE_BYTES, 32, (PUBLIC_KEY_SIZE + 7) // 8, 4, 8] + [
         Transaction.N_BYTES
     ] * SIZE
     N_BYTES = sum(BYTE_COUNTS)
@@ -413,6 +472,7 @@ class Block:
         lambda b: int.from_bytes(b, ENDIAN),
         LXX,
         LXX,
+        lambda b: int.from_bytes(b, ENDIAN),
         lambda b: int.from_bytes(b, ENDIAN),
     ] + [Transaction.from_bytes] * SIZE
 
@@ -423,17 +483,19 @@ class Block:
         validator: bytes,
         nonce: int = 0,
         version: int = 0,
+        val_reward: int = 0,
     ):
         self.validator = validator
         self.transactions = transactions
         self.prev: Union[Optional["Block"], bytes] = prev
         self.nonce = nonce
         self.version = version
+        self.val_reward = val_reward
         self._cache_hash = None
         self._cache_inner_hash = None
         self._cache_val = nonce
 
-    def _bytes_without_val(self):
+    def _bytes_without_nonce(self):
         return (
             (
                 self.prev.hash()
@@ -442,13 +504,14 @@ class Block:
             )
             + self.validator
             + self.version.to_bytes(Block.BYTE_COUNTS[3], ENDIAN)
+            + self.val_reward.to_bytes(Block.BYTE_COUNTS[4], ENDIAN)
             + b"".join(map(Transaction.to_bytes, self.transactions))
         )
 
     def to_bytes(self):
         return (
             self.nonce.to_bytes(Block.BYTE_COUNTS[0], ENDIAN)
-            + self._bytes_without_val()
+            + self._bytes_without_nonce()
         )
 
     @classmethod
@@ -463,12 +526,12 @@ class Block:
         # last Block.SIZE components are transactions
         components, transactions = components[: -Block.SIZE], components[-Block.SIZE :]
         components.insert(0, transactions)
-        transactions, nonce, prev, validator, version = components
-        return cls(transactions, prev, validator, nonce, version)
+        transactions, nonce, prev, validator, version, val_reward = components
+        return cls(transactions, prev, validator, nonce, version, val_reward)
 
     def _inner_hash(self):
         if self._cache_inner_hash is None:
-            self._cache_inner_hash = sha256(self._bytes_without_val())
+            self._cache_inner_hash = sha256(self._bytes_without_nonce())
         return self._cache_inner_hash
 
     def hash(self):
@@ -492,15 +555,16 @@ class NonceMiningJobHandler:
         block: "Block",
         use_cuda_miner: bool,
         valid_block_max_hash: int,
+        val_reward: int,
         init_nonce: int = 1,
     ):
         _global_lock.acquire()
-        if any(b == block for b, _, _, _ in self.queued_jobs):
+        if any(b == block for b, *_ in self.queued_jobs):
             _global_lock.release()
             self.kill()
             raise ValueError("a job has already been queued for this block")
         self.queued_jobs.append(
-            (block, use_cuda_miner, valid_block_max_hash, init_nonce)
+            (block, use_cuda_miner, valid_block_max_hash, init_nonce, val_reward)
         )
         _global_lock.release()
 
@@ -521,9 +585,9 @@ class NonceMiningJobHandler:
                 if self._killed.is_set():
                     return
                 thread_yield()
-            block, use_cuda_miner, valid_block_max_hash, init_nonce = self.queued_jobs[
-                0
-            ]
+            block, use_cuda_miner, valid_block_max_hash, init_nonce, val_reward = (
+                self.queued_jobs[0]
+            )
             if block.nonce != 0:
                 raise ValueError(
                     "nonce already set to non-zero value, meaning it was already mined"
@@ -554,6 +618,7 @@ class NonceMiningJobHandler:
                     block.validator,
                     init_nonce,
                     block.version,
+                    val_reward,
                 )
                 while not self._killed.is_set() and not is_valid_block(
                     block_, valid_block_max_hash
@@ -574,6 +639,8 @@ def chain_from_bytes(raw: bytes):
         raw[i : i + Block.N_BYTES]
         for i in range(0, int(len(raw) / Block.N_BYTES) * Block.N_BYTES, Block.N_BYTES)
     ]
+    if not all(len(bb) == Block.N_BYTES for bb in block_bytes):
+        return None
     blocks = list(map(Block.from_bytes, block_bytes))
     # link blocks
     for block in blocks:
@@ -588,7 +655,7 @@ def chain_from_bytes(raw: bytes):
         h = block.hash()
         prevs = list(map(lambda b: b.prev, blocks))
         if h not in prevs:
-            return None  # no matching next block
+            return None  # missing link in chain
         next_block = blocks[prevs.index(h)]
         next_block.prev = block
         blocks.remove(next_block)
@@ -617,22 +684,29 @@ class OpenBlock:
         self,
         transaction: "Transaction",
         balances: Dict[bytes, int],
-        invalidated_uuids: set[bytes],
+        invalidated_timestamps: set[bytes],
         const_transaction_fee: int,
         relative_transaction_fee: float,
         val_reward: int,
         transaction_sane: bool = None,
+        max_timestamp_now_diff: int = -1,
     ) -> tuple[bool, bool]:
+        transaction.recv_time = time.time_ns().to_bytes(
+            Transaction.BYTE_COUNTS[5], ENDIAN
+        )
         if not transaction.is_valid(
             balances,
-            invalidated_uuids,
+            invalidated_timestamps,
             const_transaction_fee,
             relative_transaction_fee,
             transaction_sane,
+            max_timestamp_now_diff,
         ):
             return False, False
         self.transactions.append(transaction)
-        execute_transaction(transaction, self.validator, balances, invalidated_uuids)
+        execute_transaction(
+            transaction, self.validator, balances, invalidated_timestamps
+        )
         if len(self.transactions) < Block.SIZE:
             return False, True
         else:
@@ -799,12 +873,13 @@ def _mine(
     incompatible_chain_distrust: int = 1,
     compatible_chain_distrust: int = 1,
     val_reward: int = 0,
-    const_transaction_fee: int = 0,
-    relative_transaction_fee: float = 0.0,
+    const_min_transaction_fee: int = 0,
+    relative_min_transaction_fee: float = 0.0,
     max_recv_chains_per_iter: int = -1,
     max_recv_blocks_per_iter: int = -1,
     max_recv_transactions_per_iter: int = -1,
     collect_time: int = 0,
+    max_timestamp_now_diff: int = -1,
     copy_balances_on_broadcast=False,
     transaction_backlog_size: int = 1,
     broadcast_balances_as_bytes: bool = False,
@@ -812,6 +887,8 @@ def _mine(
     valid_block_max_hash: int = 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
     version: int = 0,
     cuda_miner_load_args: Optional[tuple] = None,
+    get_padding_transaction: Optional[Callable[[], "Transaction"]] = None,
+    min_income_to_mine: int = 1,
 ):
     """
     The main blockchain function. It receives transactions and chains, verifies them, and updates the blockchain.
@@ -830,12 +907,13 @@ def _mine(
     :param incompatible_chain_distrust: how many blocks a chain that has incompatible balances with the current chain must be longer to replace the current chain
     :param compatible_chain_distrust: how many blocks a chain that has the same balances at the end has to be longer to replace the current chain
     :param val_reward: the reward for validating a block
-    :param const_transaction_fee: the constant transaction fee that is subtracted from the amount sent and given to the validator
-    :param relative_transaction_fee: percentage (value between 0 and 1) of the amount sent that is given to the validator
+    :param const_min_transaction_fee: the constant transaction fee that is subtracted from the amount sent and given to the validator
+    :param relative_min_transaction_fee: percentage (value between 0 and 1) of the amount sent that is given to the validator
     :param max_recv_chains_per_iter: how many alternative chains may be processed in one loop iteration (helps limit time / iter). negative value means no limit
     :param max_recv_blocks_per_iter: how many blocks may be processed in one loop iteration (helps limit time / iter). negative value means no limit
     :param max_recv_transactions_per_iter: how many transactions may be processed in one loop iteration (helps limit time / iter). negative value means no limit
     :param collect_time: how many nanoseconds to wait and collect transactions before processing them (allows waiting for more transactions to arrive so miner can select the most valuable ones)
+    :param max_timestamp_now_diff: the max amount of time a transaction timestamp can be behind the current time
     :param copy_balances_on_broadcast: whether to copy the balances dictionary when broadcasting it. (helps prevent bugs by removing mutation coupling with blockchain core). Ignored if broadcast_balances_as_bytes is True.
     :param transaction_backlog_size: how many blocks' submitted transactions are stored in the backlog in case an alternative chain arrives (where those suddenly are valid)
     :param broadcast_balances_as_bytes: whether to broadcast balances as bytes or as a dictionary
@@ -843,6 +921,8 @@ def _mine(
     :param valid_block_max_hash: the max value of the hash (interpreted as integer) that makes a block valid
     :param version: the version of the blockchain (to allow for forks)
     :param cuda_miner_load_args: Optional tuple or args used to (optionally) load a cuda miner on startup
+    :param get_padding_transaction: Optional function that takes no args and returns a new padding transaction (= transaction from validator_wallet_1 to validator_wallet_2)
+    :param min_income_to_mine: The minimum amount of income a miner has to make from the transaction pool to mine it (to avoid power consumption exceeding gain)
     """
     if cuda_miner_load_args is not None:
         load_cuda_miner(*cuda_miner_load_args)
@@ -851,6 +931,8 @@ def _mine(
     assert transaction_backlog_size >= 0, "transaction_backlog_size cannot be negative"
     assert max_recv_chains_per_iter != 0, "max_recv_chains_per_iter cannot be 0"
     assert max_recv_blocks_per_iter != 0, "max_recv_blocks_per_iter cannot be 0"
+    assert isinstance(min_income_to_mine, int)
+    assert min_income_to_mine >= -1
     assert (
         max_recv_transactions_per_iter != 0
     ), "max_recv_transactions_per_iter cannot be 0"
@@ -862,9 +944,9 @@ def _mine(
         compatible_chain_distrust > 0
     ), "an external chain cannot be trusted as much as or more than more than your own"
     assert val_reward >= 0, "you cannot have a negative nonce reward"
-    assert const_transaction_fee >= 0, "you cannot have a negative transaction fee"
+    assert const_min_transaction_fee >= 0, "you cannot have a negative transaction fee"
     assert (
-        0 <= relative_transaction_fee < 1
+        0 <= relative_min_transaction_fee < 1
     ), "relative transaction fee must be in [0, 1)"
     assert len(validator) == PUBLIC_KEY_SIZE // 8, "invalid validator public key size"
     assert transaction_recv_channel is None or isinstance(
@@ -895,11 +977,12 @@ def _mine(
     assert use_cuda_miner_event is None or isinstance(
         use_cuda_miner_event, (threading.Event, mp.synchronize.Event)
     )
+    assert get_padding_transaction is None or callable(get_padding_transaction)
     assert isinstance(incompatible_chain_distrust, int)
     assert isinstance(compatible_chain_distrust, int)
     assert isinstance(val_reward, int)
-    assert isinstance(const_transaction_fee, int)
-    assert isinstance(relative_transaction_fee, float)
+    assert isinstance(const_min_transaction_fee, int)
+    assert isinstance(relative_min_transaction_fee, float)
     assert isinstance(max_recv_chains_per_iter, int)
     assert isinstance(max_recv_transactions_per_iter, int)
     assert isinstance(collect_time, int)
@@ -912,13 +995,14 @@ def _mine(
     assert isinstance(init_balances, dict) or init_balances is None
 
     vsc = verified_subchain(chain)
-    init_chain_valid, balances, invalidated_uuids = full_verify(
+    init_chain_valid, balances, invalidated_timestamps = full_verify(
         vsc,
         init_balances,
         val_reward,
-        const_transaction_fee,
-        relative_transaction_fee,
+        const_min_transaction_fee,
+        relative_min_transaction_fee,
         valid_block_max_hash,
+        max_timestamp_now_diff,
     )
     if not init_chain_valid:
         raise RuntimeError("invalid initial chain provided")
@@ -937,15 +1021,18 @@ def _mine(
     replaced_chain = False
     last_loop_time_ns = 0
     last_block_balances = balances.copy()
+    n_unready_blocks = get_n_unready_blocks(chain)
 
     unverified_blocks = []
     i = chain
     while i != vsc:
         unverified_blocks.append(i)
         i = i.prev
-    for i in reversed(unverified_blocks):
+    for b in reversed(unverified_blocks):
+        for t in b.transactions:
+            execute_transaction(t, validator, balances, invalidated_timestamps)
         mining_job_handler.launch_job(
-            i,
+            b,
             use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
             valid_block_max_hash,
             int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
@@ -968,13 +1055,14 @@ def _mine(
         for recv_chain, chain_bytes in zip(recv_chains, recv_chain_bytes):
             recv_chain = verified_subchain(recv_chain)
             new_chain_len = chain_len(recv_chain)
-            is_valid, new_balances, new_invalidated_uuids = full_verify(
+            is_valid, new_balances, new_invalidated_timestamps = full_verify(
                 recv_chain,
                 init_balances,
                 val_reward,
-                const_transaction_fee,
-                relative_transaction_fee,
+                const_min_transaction_fee,
+                relative_min_transaction_fee,
                 valid_block_max_hash,
+                max_timestamp_now_diff,
             )
             if side_channel is not None:
                 broadcast_side_channel(
@@ -995,14 +1083,14 @@ def _mine(
                 favorite_new_chain_data = (
                     recv_chain,
                     new_balances,
-                    new_invalidated_uuids,
+                    new_invalidated_timestamps,
                 )
                 max_trust_level = max(
                     new_chain_len - current_chain_len - incompatible_chain_distrust + 1,
                     new_chain_len - current_chain_len - compatible_chain_distrust + 1,
                 )
         if favorite_new_chain_data[0] is not None:
-            chain, balances, invalidated_uuids = favorite_new_chain_data
+            chain, balances, invalidated_timestamps = favorite_new_chain_data
             last_block_balances = balances.copy()
             mining_job_handler.kill()
             mining_job_handler = NonceMiningJobHandler()
@@ -1028,16 +1116,17 @@ def _mine(
                     )
                 continue
 
-            fake_block = Block(None, None, None, None, None)
+            fake_block = Block(*((None,) * 6))
             fake_block.hash = lambda: prev_block_hash
             recv_block.prev = fake_block
-            is_valid, new_balances, new_invalidated_uuids = full_verify(
+            is_valid, new_balances, new_invalidated_timestamps = full_verify(
                 recv_block,
                 last_block_balances,
                 val_reward,
-                const_transaction_fee,
-                relative_transaction_fee,
+                const_min_transaction_fee,
+                relative_min_transaction_fee,
                 valid_block_max_hash,
+                max_timestamp_now_diff,
                 _depth=1,
             )
 
@@ -1052,7 +1141,7 @@ def _mine(
                 chain = recv_block
                 balances = new_balances
                 last_block_balances = balances.copy()
-                invalidated_uuids = new_invalidated_uuids
+                invalidated_timestamps = new_invalidated_timestamps
                 mining_job_handler.kill()
                 mining_job_handler = NonceMiningJobHandler()
                 open_block = OpenBlock(chain, validator)
@@ -1069,11 +1158,12 @@ def _mine(
         # instead of multiple ones in a queue. On terminate, I could also write out the transaction pool through the
         # side channel to preserve them (and add a new input argument for it).
         # TODO convert OpenBlock into a transaction pool (see above TODO)
+        # TODO use min_income_to_mine to determine whether to even mine the current pool
         recv_trans, recv_trans_bytes = get_received_transactions(
             transaction_recv_channel, max_recv_transactions_per_iter
         )
         t_is_sane = [
-            t.is_sane(const_transaction_fee, relative_transaction_fee)
+            t.is_sane(const_min_transaction_fee, relative_min_transaction_fee)
             for t in recv_trans
         ]
         if side_channel is not None:
@@ -1092,7 +1182,7 @@ def _mine(
         # sorting transactions helps avoid incompatible chains due to different transaction orders
         recv_sane_transactions_and_bytes = sorted(
             filtered_recv_transactions_and_bytes,
-            key=lambda t_and_bytes: t_and_bytes[0].amount,
+            key=lambda t_and_bytes: t_and_bytes[0].fee,
             reverse=True,
         )
         transactions = recv_sane_transactions_and_bytes
@@ -1104,11 +1194,12 @@ def _mine(
             is_closed, is_valid_t = open_block.receive(
                 transaction,
                 balances,
-                invalidated_uuids,
-                const_transaction_fee,
-                relative_transaction_fee,
+                invalidated_timestamps,
+                const_min_transaction_fee,
+                relative_min_transaction_fee,
                 val_reward,
                 True,
+                max_timestamp_now_diff,
             )
             if side_channel is not None:
                 broadcast_side_channel(
@@ -1122,12 +1213,19 @@ def _mine(
                 sorted_transactions = sorted(
                     open_block.transactions, key=lambda t: t.amount, reverse=True
                 )
-                chain = Block(sorted_transactions, chain, validator, version=version)
+                chain = Block(
+                    sorted_transactions,
+                    chain,
+                    validator,
+                    version=version,
+                    val_reward=val_reward,
+                )
                 last_block_balances = balances.copy()
                 mining_job_handler.launch_job(
                     chain,
                     use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
                     valid_block_max_hash,
+                    val_reward,
                     int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
                 )
                 open_block = OpenBlock(chain, validator)
@@ -1136,7 +1234,9 @@ def _mine(
                 transaction_backlog.append([])
                 updated_chain = True
 
-        if updated_chain and block_is_ready(chain):
+        new_n_unready_blocks = get_n_unready_blocks(chain)
+        if updated_chain and new_n_unready_blocks != n_unready_blocks:
+            n_unready_blocks = new_n_unready_blocks
             broadcast_chain(chain_broadcast_channel, chain, broadcast_chain_as_bytes)
             broadcast_balances(
                 balance_broadcast_channel,
@@ -1163,12 +1263,14 @@ class MiningConfig:
         max_recv_blocks_per_iter: int = 1,
         max_recv_transactions_per_iter: int = Block.SIZE,
         collect_time: int = 0,
+        max_timestamp_now_diff: int = -1,
         copy_balances_on_broadcast: bool = True,
         transaction_backlog_size: int = 2,
         broadcast_balances_as_bytes: bool = True,
         broadcast_chain_as_bytes: bool = True,
         valid_block_max_hash: int = 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
         version: int = 0,
+        min_income_to_mine: int = 1,
     ):
         self.incompatible_chain_distrust = incompatible_chain_distrust
         self.compatible_chain_distrust = compatible_chain_distrust
@@ -1179,12 +1281,14 @@ class MiningConfig:
         self.max_recv_blocks_per_iter = max_recv_blocks_per_iter
         self.max_recv_transactions_per_iter = max_recv_transactions_per_iter
         self.collect_time = collect_time
+        self.max_timestamp_now_diff = max_timestamp_now_diff
         self.copy_balances_on_broadcast = copy_balances_on_broadcast
         self.transaction_backlog_size = transaction_backlog_size
         self.broadcast_balances_as_bytes = broadcast_balances_as_bytes
         self.broadcast_chain_as_bytes = broadcast_chain_as_bytes
         self.valid_block_max_hash = valid_block_max_hash
         self.version = version
+        self.min_income_to_mine = min_income_to_mine
 
 
 class Miner:
@@ -1202,11 +1306,13 @@ class Miner:
         config: MiningConfig = None,
         run_with: str = "direct",
         start_immediately: bool = True,
+        get_padding_transaction: Optional[Callable[[], "Transaction"]] = None,
     ):
         super().__init__()
         self.validator = validator
         self.chain = chain
         self.init_balances = init_balances.copy() if init_balances is not None else {}
+        self.get_padding_transaction = get_padding_transaction
         if config is None:
             config = MiningConfig()
 
@@ -1249,18 +1355,24 @@ class Miner:
         self.max_recv_blocks_per_iter = config.max_recv_blocks_per_iter
         self.max_recv_transactions_per_iter = config.max_recv_transactions_per_iter
         self.collect_time = config.collect_time
+        self.max_timestamp_now_diff = config.max_timestamp_now_diff
         self.copy_balances_on_broadcast = config.copy_balances_on_broadcast
         self.transaction_backlog_size = config.transaction_backlog_size
         self.broadcast_balances_as_bytes = config.broadcast_balances_as_bytes
         self.broadcast_chain_as_bytes = config.broadcast_chain_as_bytes
         self.valid_block_max_hash = config.valid_block_max_hash
         self.version = config.version
+        self.min_income_to_mine = config.min_income_to_mine
 
         self.run_with = run_with
         self._get_balances_last = (
             serialize_balances(self.init_balances)
             if self.broadcast_balances_as_bytes
-            else self.init_balances
+            else (
+                self.init_balances.copy()
+                if self.copy_balances_on_broadcast
+                else self.init_balances
+            )
         )
         self._get_chain_last = (
             chain_to_bytes(self.chain)
@@ -1289,6 +1401,7 @@ class Miner:
             self.max_recv_blocks_per_iter,
             self.max_recv_transactions_per_iter,
             self.collect_time,
+            self.max_timestamp_now_diff,
             self.copy_balances_on_broadcast,
             self.transaction_backlog_size,
             self.broadcast_balances_as_bytes,
@@ -1300,6 +1413,8 @@ class Miner:
                 if run_with == "mp" or _cuda_miner_mod is None
                 else None
             ),
+            self.get_padding_transaction,
+            self.min_income_to_mine,
         )
         self.started = start_immediately
         if run_with == "direct":

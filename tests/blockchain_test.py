@@ -12,7 +12,6 @@ if USE_CUDA:
 
 class BlockchainTests(unittest.TestCase):
     def test_blockchain_raw1(self):
-        import random
         import threading
 
         names_to_keys = {
@@ -81,7 +80,9 @@ class BlockchainTests(unittest.TestCase):
         blockchain_thread.start()
 
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
-            uuid_bytes = random.randbytes(blockchain.Transaction.BYTE_COUNTS[4])
+            import time
+            import random
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -97,7 +98,7 @@ class BlockchainTests(unittest.TestCase):
                 + public_key_receiver
                 + amount_bytes
                 + transaction_fee_bytes
-                + uuid_bytes,
+                + timestamp_bytes,
                 private_key_sender,
             )
             return blockchain.Transaction(
@@ -105,7 +106,8 @@ class BlockchainTests(unittest.TestCase):
                 public_key_receiver,
                 amount,
                 0,
-                uuid_bytes,
+                timestamp_bytes,
+                time.time_ns().to_bytes(8, "little"),
                 signature_bytes,
             )
 
@@ -129,7 +131,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(30)
+        time.sleep(80)
         terminate_event.set()
         blockchain_thread.join()
         balances = {
@@ -179,7 +181,9 @@ class BlockchainTests(unittest.TestCase):
             chain_handler.use_cuda_miner()
 
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
-            uuid_bytes = random.randbytes(blockchain.Transaction.BYTE_COUNTS[4])
+            import time
+            import random
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -195,7 +199,7 @@ class BlockchainTests(unittest.TestCase):
                 + public_key_receiver
                 + amount_bytes
                 + transaction_fee_bytes
-                + uuid_bytes,
+                + timestamp_bytes,
                 private_key_sender,
             )
             return blockchain.Transaction(
@@ -203,7 +207,8 @@ class BlockchainTests(unittest.TestCase):
                 public_key_receiver,
                 amount,
                 0,
-                uuid_bytes,
+                timestamp_bytes,
+                timestamp_bytes,
                 signature_bytes,
             )
 
@@ -227,7 +232,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(30)
+        time.sleep(80)
         _, balances = chain_handler.finish()
         balances = blockchain.deserialize_balances(balances)
         balances = {
@@ -278,7 +283,9 @@ class BlockchainTests(unittest.TestCase):
             chain_handler.use_cuda_miner()
 
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
-            uuid_bytes = random.randbytes(blockchain.Transaction.BYTE_COUNTS[4])
+            import time
+            import random
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -294,7 +301,7 @@ class BlockchainTests(unittest.TestCase):
                 + public_key_receiver
                 + amount_bytes
                 + transaction_fee_bytes
-                + uuid_bytes,
+                + timestamp_bytes,
                 private_key_sender,
             )
             return blockchain.Transaction(
@@ -302,7 +309,8 @@ class BlockchainTests(unittest.TestCase):
                 public_key_receiver,
                 amount,
                 0,
-                uuid_bytes,
+                timestamp_bytes,
+                time.time_ns().to_bytes(8, "little"),
                 signature_bytes,
             )
 
@@ -337,7 +345,7 @@ class BlockchainTests(unittest.TestCase):
 
         # test with invalid signature
         transaction = get_test_transaction(b"name1", b"name2", 10)
-        transaction.uuid = random.randbytes(
+        transaction.timestamp = random.randbytes(
             blockchain.Transaction.BYTE_COUNTS[4]
         )  # change uuid, now signature is invalid
         transaction_bytes = transaction.to_bytes()
@@ -351,7 +359,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(30)
+        time.sleep(80)
         chain_bytes, balances = chain_handler.finish()
         balances = blockchain.deserialize_balances(balances)
         balances = {
@@ -368,6 +376,7 @@ class BlockchainTests(unittest.TestCase):
                 mining_config.const_transaction_fee,
                 mining_config.relative_transaction_fee,
                 mining_config.valid_block_max_hash,
+                mining_config.max_timestamp_now_diff
             )
         )
         self.assertEqual(blockchain.chain_len(chain), 3)

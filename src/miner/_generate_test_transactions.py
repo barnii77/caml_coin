@@ -1,5 +1,6 @@
 import blockchain
 import random
+import time
 
 with open("keys/private_key.bin", "rb") as f, open("keys/public_key.bin", "rb") as g:
     private_key_sender = f.read()
@@ -7,7 +8,7 @@ with open("keys/private_key.bin", "rb") as f, open("keys/public_key.bin", "rb") 
 
 
 def new_transaction(amount: int = 10):
-    uuid_bytes = random.randbytes(blockchain.Transaction.BYTE_COUNTS[4])
+    timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
     # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
     _, public_key_receiver = blockchain.gen_key_pair()
     amount_bytes = amount.to_bytes(
@@ -21,7 +22,7 @@ def new_transaction(amount: int = 10):
         + public_key_receiver
         + amount_bytes
         + transaction_fee_bytes
-        + uuid_bytes,
+        + timestamp_bytes,
         private_key_sender,
     )
     return (
@@ -30,7 +31,8 @@ def new_transaction(amount: int = 10):
             public_key_receiver,
             amount,
             0,
-            uuid_bytes,
+            timestamp_bytes,
+            timestamp_bytes,
             signature_bytes,
         )
         .to_bytes()
