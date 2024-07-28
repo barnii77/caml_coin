@@ -383,7 +383,7 @@ class Transaction:
         recv_time: bytes,
         private_key: bytes,
     ):
-        timestamp_bytes = time.time_ns().to_bytes(Transaction.BYTE_COUNTS[4])
+        timestamp_bytes = time.time_ns().to_bytes(Transaction.BYTE_COUNTS[4], ENDIAN)
         signature = sign_message(
             sender
             + receiver
@@ -440,7 +440,7 @@ class Transaction:
         can_afford = balances.get(self.sender, 0) > self.amount + self.fee > 0
         timestamp_valid = (
             max_timestamp_now_diff == -1
-            or int.from_bytes(self.recv_time, ENDIAN)
+            or 0 <= int.from_bytes(self.recv_time, ENDIAN)
             - int.from_bytes(self.timestamp, ENDIAN)
             <= max_timestamp_now_diff
         ) and self.timestamp not in invalidated_timestamps
