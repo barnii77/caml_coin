@@ -13,25 +13,62 @@ import argparse
 from typing import Optional
 from flask import Flask, request, render_template, redirect, url_for
 
-# TODO benchmark blockchain engine because it is terribly slow and unit tests don't always pass
+# TODO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# my tests were broken and I have some deeply hidden bug
 
-# TODO change the known miner removal system (for inactive miners) so that all "did he respond" bools over a certain
-# amount of time are saved, regularly filtered (like the caches) and the cutoff for removal is a percentage of the samples
-# and a minimum amount of samples required for significance + a maximum amount of amount of samples where the miner is
-# considered bombarded with messages and we are forgiving with him for not answering.
+# TODO !!!!!!!!!!!!!!!!!!
+# I could potentially solve the difficulty problem by enabling prolonged competition, meaning that miners do not
+# immediately accept other miner's work, but instead they compute the expected amount of hashes it takes to beat some
+# section of the chain, eg:
+# chain is b1 -> b2 -> b3 -> b4
+# b4 has hash 0x00FFFF => E[n_tested_nonces_to_get_subchain] = 0xFFFFFF - 0x00FFFF = ~0x00FFFF = 0xFF
+# b4 brings total income of 1_000 coins
+# ==> b4_n_coins_per_hash = 1_000 / 0xFF ~= *4*
+# b3 has hash 0x00FFFF and b4 has hash 0x00FFFF => E[n_tested_nonces_to_get_subchain] = 0xFF + 0xFF = 0x1FE
+# b3 brings total income 10_000 coins
+# ==> b3_n_coins_per_hash = 10_000 / 0x1FE ~= *20*
+# ...
+# ==> b2_n_coins_per_hash ~= *10*
+# ==> b1_n_coins_per_hash ~= *3*
+# additionally, one could also select a set of new transactions from the pool and create a new block.
+# this new block would require ~valid_block_max_hash (bitflip of vbmh) because that is the minimum amount of compute required for any block.
+# (note that the expected amount of hashes to beat a block is `max(~valid_block_max_hash, ~current_hash(block))`)
+# assume that the new block made of the most profitable subset of transactions would give.
+# ==> bnew_n_coins_per_hash = *8*
+# the overall conclusion would be:
+# =======> try to beat b3 because that will be most profitable.
+# it is important that this conclusion is frequently revised by recomputing all these numbers to account for chain changes and t pool changes.
+# NOTICE SOME THINGS ABOUT THIS APPROACH:
+# 1. It eliminates the need to dynamically adjust valid_block_max_hash because the network dynamics will do that
+# 2. It requires changing the chain selection criterion (whether to take or throw away a new incoming chain) from chain length to `sum(~hash(block) for block in chain)`
+# 3. It will automatically make the chain more secure if there are no new transactions even with mining_reward = 0
+# SOME (BUT NOT ALL) CHANGES THIS REQUIRES:
+# 1. the CUDA miner must be fed the min_hash_to_beat instead of valid_block_max_hash (TODO: rename variable and provide correct value)
+# 2. there must be a mechanism to add all transactions whose execution has thereby been undone back into the pool when the block is beaten
+# 3. An new work selection criterion (duh)
 
-# TODO fix/test invalid block full chain request callback
+# TODO allow requesting a sub-part of the chain by allowing anyone to request just the hashes of each block in the chain, in order, and then requesting only the blocks that don't match
+
+# TODO make the valid_block_max_hash a function that returns bytes / integer (whatever type it is rn) instead of just a constant.
+# this is so that dynamic difficulty adjustment can be elegantly implemented and injected into the blockchain engine.
+# that also means I'll have to add timestamp info to the blockchain, more or less. The timestamp of a block is defined
+# to be max(block.prev.timestamp, max(t.timestamp for t in block.transactions)).
+# Note that in the case of basic transaction ordering, this is simply max(t.timestamp for t in block.transactions).
+
+# TODO consider removing the profit maximization sorting and finding a mechanism that makes any alternative implementation
+# which has this mechanism impossible (or at least require a hard fork instead of a mere rewrite)
+
+# TODO change the contact system to expect miners to regularly send messages to a special api endpoint within a certain time frame and remove them if they don't.
+# this time frame could be something like 1 minute for debugging and 24 hours for production
 
 # TODO encrypt private key when it is generated and on startup, require entering a password to decrypt it; also check it is correct by deriving the public key from decrypted private key and checking equivalence (public is stored plainly)
-
-# TODO figure out how to dynamically adjust the valid_block_max_hash (difficulty)
 
 x_client_port = "x-client-port"
 _chain_time_cache = {}
 _block_time_cache = {}
 _transaction_time_cache = {}
 _miner_n_non_responsive = {}
-_hash_to_validity = {}
+_hash_to_feedback = {}
 _hash_to_save_time = {}
 _temporary_blacklist = {}
 _hash_to_sender = {}
@@ -83,10 +120,6 @@ def save_known_miners():
         return
     with open("known_miners.txt", "w") as f:
         f.write("\n".join(other_miners))
-
-
-def add_miner_response_sample(sender, sample):
-    _miner_n_non_responsive[sender].append(sample)
 
 
 def _broadcast_to_miner(m: str, data: bytes, route: str):
@@ -147,7 +180,7 @@ def clean_caches():
         LN1,
         LN1,
         lambda other_miner: other_miners.remove(other_miner),
-        lambda h: _hash_to_validity.pop(h),
+        lambda h: _hash_to_feedback.pop(h),
         LN1,
     ]
     dropout_time = [
@@ -208,10 +241,11 @@ def register_new_validities():
     ]
     item = miner.get_side_channel_item()
     while item is not None:
-        item_type, (data, validity) = item
+        item_type, (data, feedback) = item
         print("executing a callback of type", item_type)
         h = blockchain.sha256(data)
-        _hash_to_validity[h] = validity
+        validity = blockchain.is_accepted_feedback(feedback)
+        _hash_to_feedback[h] = feedback
         _hash_to_save_time[h] = time.time()
         if not validity:
             sender = _hash_to_sender[h]
@@ -485,29 +519,29 @@ def register_as_other_miner():
     return "registered", 200
 
 
-@app.route("/get-validity-hex", methods=["GET", "POST"])
+@app.route("/get-feedback-hex", methods=["GET", "POST"])
 @disallow_blacklisted
-def get_validity_hex():
+def get_feedback_hex():
     if request.method == "GET":
-        return render_template("get_validity.html"), 200
+        return render_template("get_feedback.html"), 200
     h = bytes.fromhex(request.form.get("hash", ""))
     if not h:
         return "no hash provided", 400
-    validity = _hash_to_validity.get(h)
-    return "true" if validity else "unknown" if validity is None else "false", (
-        201 if validity is None else 200
+    feedback = _hash_to_feedback.get(h)
+    return blockchain.format_feedback_code(feedback), (
+        200 if blockchain.is_accepted_feedback(feedback) else 201
     )
 
 
-@app.route("/get-validity", methods=["POST"])
+@app.route("/get-feedback", methods=["POST"])
 @disallow_blacklisted
-def get_validity():
+def get_feedback():
     h = request.form.get("hash", "").encode("latin-1")
     if not h:
         return "no hash provided", 400
-    validity = _hash_to_validity.get(h)
-    return "true" if validity else "unknown" if validity is None else "false", (
-        201 if validity is None else 200
+    feedback = _hash_to_feedback.get(h)
+    return blockchain.format_feedback_code(feedback), (
+        200 if blockchain.is_accepted_feedback(feedback) else 201
     )
 
 

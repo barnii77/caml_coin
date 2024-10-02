@@ -1,4 +1,5 @@
 import threading
+import math
 import multiprocessing as mp
 import queue
 import enum
@@ -14,9 +15,9 @@ from cryptography.hazmat.primitives.asymmetric.utils import (
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
-from typing import Optional, Union, Any, List, Dict, Callable
+from typing import Optional, Union, Any, List, Dict, Callable, Set
 
-from miner_utils import thread_yield, sha256
+from miner_utils import thread_yield, sha256, Shared, LinkedEvent
 
 
 # fix python std lib bug in mp (have to create queue before I can access mp.queues and same with event and mp.synchronize)
@@ -43,7 +44,10 @@ PUBLIC_KEY_SIZE = 264
 HAS_VAL_REWARD_WARNING = """Warning, val_reward > 0.
 Make sure miners can't do a self-reward attack.
 A self-reward attack is when a miner spams transactions from one of his accounts to another (without broadcasting) and mines on those transactions.
-This way he can get the reward without actually doing anything (useful)."""
+This way he can get the reward without actually doing anything (useful)."""  # NOTE: if self-reward "attack" is the default behaviour and everyone does it, it's not really an attack lol
+# FIXME fee_density seems broken and should currently not be used
+# TODO basic must not be used in production because it encourages dropping low-profit transactions
+TRANSACTIONS_SORT_MODE = "basic"  # fee_density / basic
 
 
 def schedule_jit_cuda_miner_load(*args):
@@ -101,9 +105,128 @@ _global_lock = threading.Lock()
 
 
 class SideChannelItemType(enum.Enum):
-    TRANSACTION_VALIDITY_PAIR = 0
-    CHAIN_VALIDITY_PAIR = 1
-    BLOCK_VALIDITY_PAIR = 2
+    # NOTE: these values have to be 0, 1, 2 because they are used as indices in app_miner.py
+    TRANSACTION_FEEDBACK_PAIR = 0
+    CHAIN_FEEDBACK_PAIR = 1
+    BLOCK_FEEDBACK_PAIR = 2
+
+
+class FeedbackCode(enum.Enum):
+    TRANSACTION_INSANE = enum.auto()
+    TRANSACTION_REJECTED_BUT_SANE = enum.auto()
+    TRANSACTION_ACCEPTED = enum.auto()
+    CHAIN_INVALID = enum.auto()
+    CHAIN_VALID_BUT_NOT_ACCEPTED = enum.auto()
+    CHAIN_ACCEPTED = enum.auto()
+    BLOCK_REJECTED = enum.auto()
+    BLOCK_ACCEPTED = enum.auto()
+
+
+def format_feedback_code(code: "FeedbackCode"):
+    if code == FeedbackCode.TRANSACTION_ACCEPTED:
+        return "TransactionAccepted"
+    elif code == FeedbackCode.TRANSACTION_INSANE:
+        return "TransactionInsane"
+    elif code == FeedbackCode.TRANSACTION_REJECTED_BUT_SANE:
+        return "TransactionRejectedButSane"
+    elif code == FeedbackCode.CHAIN_INVALID:
+        return "ChainInvalid"
+    elif code == FeedbackCode.CHAIN_VALID_BUT_NOT_ACCEPTED:
+        return "ChainValidButNotAccepted"
+    elif code == FeedbackCode.CHAIN_ACCEPTED:
+        return "ChainAccepted"
+    elif code == FeedbackCode.BLOCK_REJECTED:
+        return "BlockRejected"
+    elif code == FeedbackCode.BLOCK_ACCEPTED:
+        return "BlockAccepted"
+    else:
+        return "InvalidFeedbackCode"
+
+
+def is_accepted_feedback(code: "FeedbackCode"):
+    return code in (
+        FeedbackCode.CHAIN_ACCEPTED,
+        FeedbackCode.BLOCK_ACCEPTED,
+        FeedbackCode.TRANSACTION_ACCEPTED,
+    )
+
+
+class TransactionSortingTreeNode:
+    def __init__(
+        self,
+        transaction: "Transaction",
+        direct_dependencies: Set["TransactionSortingTreeNode"],
+    ):
+        self.transaction = transaction
+        self.direct_dependencies = direct_dependencies
+        self._recursive_dependencies: Set["TransactionSortingTreeNode"] = None
+
+    def recursive_deps(self) -> Set["TransactionSortingTreeNode"]:
+        if self._recursive_dependencies is None:
+            indirect_deps = set()
+            for dd in self.direct_dependencies:
+                indirect_deps.update(dd.recursive_deps())
+            self._recursive_dependencies = indirect_deps
+        return self._recursive_dependencies
+
+
+def select_top_transactions(transactions: Set["Transaction"], block_size: int):
+    # build a dependency graph for the transactions
+    t_by_timestamp = sorted(
+        transactions, key=lambda t: int.from_bytes(t.timestamp, ENDIAN)
+    )
+    if TRANSACTIONS_SORT_MODE == "basic":
+        return t_by_timestamp[:block_size]
+
+    incoming = {}
+    tree_nodes = set()
+    for t in t_by_timestamp:
+        tn = TransactionSortingTreeNode(t, incoming.get(t.sender, set()).copy())
+        tree_nodes.add(tn)
+        if t.receiver not in incoming:
+            incoming[t.receiver] = set()
+        incoming[t.receiver].add(tn)
+
+    # resolve the recursive dependencies of each node
+    tn_to_rec_deps: Dict[
+        "TransactionSortingTreeNode", Set["TransactionSortingTreeNode"]
+    ] = {}
+    for tn in tree_nodes:
+        tn_to_rec_deps[tn] = tn.recursive_deps()
+
+    transactions_to_mine = set()
+    while len(transactions_to_mine) < block_size:
+        # compute total fee of all deps + node and number of nodes to compute density and filter out unreachable transactions later
+        fee_density_info: Dict["TransactionSortingTreeNode", tuple[int, int]] = (
+            {}
+        )  # tuple[cumulative_fee, n_nodes]
+        for tn in tree_nodes:
+            rec_deps = tn_to_rec_deps[tn]
+            total_fee = sum(
+                map(lambda tn: tn.transaction.fee, rec_deps), start=tn.transaction.fee
+            )
+            fee_density_info[tn] = (total_fee, len(rec_deps) + 1)
+
+        fee_densities = {
+            tn: (total_fee / n_nodes)
+            for tn, (total_fee, n_nodes) in fee_density_info.items()
+            if n_nodes <= (block_size - len(transactions_to_mine))
+        }
+        max_density_tn = max(fee_densities, key=lambda k: fee_densities[k])
+
+        update = set(max_density_tn.recursive_deps()) | {max_density_tn}
+        transactions_to_mine.update(map(lambda tn: tn.transaction, update))
+
+        # patch the tn_to_rec_deps dict to not include these transactions as keys and remove them from all deps sets
+        tree_nodes.difference_update(update)
+        for tn in update:
+            tn_to_rec_deps.pop(tn)
+        for v in tn_to_rec_deps.values():
+            v.difference_update(update)
+
+    return sorted(
+        transactions_to_mine, key=lambda t: int.from_bytes(t.timestamp, ENDIAN)
+    )
 
 
 def block_list(chain: "Block") -> List["Block"]:
@@ -262,12 +385,33 @@ def execute_transaction(
     t: "Transaction",
     validator: bytes,
     balances: Dict[bytes, int],
-    invalidated_timestamps: set[bytes],
+    invalidated_timestamps: Set[bytes],
 ):
     balances[t.sender] = balances.get(t.sender, 0) - t.amount - t.fee
     balances[t.receiver] = balances.get(t.receiver, 0) + t.amount
     balances[validator] = balances.get(validator, 0) + t.fee
     invalidated_timestamps.add(t.timestamp)
+
+
+def undo_transaction(
+    t: "Transaction",
+    validator: bytes,
+    balances: Dict[bytes, int],
+    invalidated_timestamps: Set[bytes],
+):
+    if balances.get(t.receiver, 0) < t.amount:
+        raise RuntimeError(
+            "Receiver has too little money to send back. This is probably a bug. Please report to developer."
+        )
+    if balances.get(validator, 0) < t.fee:
+        raise RuntimeError(
+            "Receiver has too little money to send back. This is probably a bug. Please report to developer."
+        )
+    balances[t.sender] = balances.get(t.sender, 0) + t.amount + t.fee
+    balances[t.receiver] = balances.get(t.receiver, 0) - t.amount
+    balances[validator] = balances.get(validator, 0) - t.fee
+    if t.timestamp in invalidated_timestamps:
+        invalidated_timestamps.remove(t.timestamp)
 
 
 def full_verify(
@@ -280,7 +424,7 @@ def full_verify(
     max_timestamp_now_diff: int,
     *,
     _depth=0,
-):
+) -> tuple[bool, dict, set]:
     """
     Full verification run of a chain.
     If _depth > 0, only verify the last _depth blocks, all blocks otherwise.
@@ -289,18 +433,24 @@ def full_verify(
     """
     balances = init_balances.copy()
     min_timestamp_values = []
-    min_ts_running_min = 1 << 65
-    for block in reversed_block_list(chain)[: _depth if _depth > 0 else None]:
-        min_ts_running_min = min(
-            min_ts_running_min,
-            min(
-                map(
-                    lambda transaction: int.from_bytes(transaction.timestamp, ENDIAN),
-                    block.transactions,
-                )
-            ),
-        )
-        min_timestamp_values.insert(0, min_ts_running_min)
+    min_ts_running_min = 1 << 64
+    # FIXME I think fee density sorting breaks this logic
+    # TODO figure out a way to filter the invalidated_timestamps for it to not grow too big
+    if TRANSACTIONS_SORT_MODE == "basic":
+        for block in reversed_block_list(chain)[: _depth if _depth > 0 else None]:
+            # NOTE: the second arg is not actually guaranteed to be less than min_ts_running_min because of fee density sorting
+            min_ts_running_min = min(
+                min_ts_running_min,
+                min(
+                    map(
+                        lambda transaction: int.from_bytes(
+                            transaction.timestamp, ENDIAN
+                        ),
+                        block.transactions,
+                    )
+                ),
+            )
+            min_timestamp_values.insert(0, min_ts_running_min)
 
     invalidated_timestamps = set()
     if chain is None:
@@ -323,14 +473,17 @@ def full_verify(
                 return False, balances, invalidated_timestamps
             execute_transaction(t, block.validator, balances, invalidated_timestamps)
         balances[block.validator] = balances.get(block.validator, 0) + val_reward
-        # filter invalidated timestamps
-        invalidated_timestamps = set(
-            filter(
-                lambda timestamp: int.from_bytes(timestamp, ENDIAN)
-                >= min_timestamp_values[i],
-                invalidated_timestamps,
+
+        # filter invalidated timestamps if in basic mode, that is, transactions are processed in exact timestamp order.
+        # in that case, one can assume timestamps to be strictly monotonously growing and can therefore throw some out.
+        if TRANSACTIONS_SORT_MODE == "basic":
+            invalidated_timestamps = set(
+                filter(
+                    lambda timestamp: int.from_bytes(timestamp, ENDIAN)
+                    >= min_timestamp_values[i],
+                    invalidated_timestamps,
+                )
             )
-        )
     return True, balances, invalidated_timestamps
 
 
@@ -372,6 +525,7 @@ class Transaction:
         self.timestamp = timestamp
         self.recv_time = recv_time
         self.signature = signature
+        self._is_padding = False
 
     @classmethod
     def create(
@@ -414,7 +568,7 @@ class Transaction:
 
     def is_sane(self, const_transaction_fee: int, relative_transaction_fee: float):
         positive = self.amount >= 0 and self.fee >= 0
-        valid_fee = self.fee >= const_transaction_fee + int(
+        valid_fee = self.fee >= const_transaction_fee + math.ceil(  # ceil for more money ;)
             self.amount * relative_transaction_fee
         )
         sender_not_receiver = self.sender != self.receiver
@@ -440,7 +594,8 @@ class Transaction:
         can_afford = balances.get(self.sender, 0) > self.amount + self.fee > 0
         timestamp_valid = (
             max_timestamp_now_diff == -1
-            or 0 <= int.from_bytes(self.recv_time, ENDIAN)
+            or 0
+            <= int.from_bytes(self.recv_time, ENDIAN)
             - int.from_bytes(self.timestamp, ENDIAN)
             <= max_timestamp_now_diff
         ) and self.timestamp not in invalidated_timestamps
@@ -525,17 +680,16 @@ class Block:
 
         # last Block.SIZE components are transactions
         components, transactions = components[: -Block.SIZE], components[-Block.SIZE :]
-        components.insert(0, transactions)
-        transactions, nonce, prev, validator, version, val_reward = components
+        nonce, prev, validator, version, val_reward = components
         return cls(transactions, prev, validator, nonce, version, val_reward)
 
     def _inner_hash(self):
-        if self._cache_inner_hash is None:
+        if self._cache_inner_hash is None or True:
             self._cache_inner_hash = sha256(self._bytes_without_nonce())
         return self._cache_inner_hash
 
     def hash(self):
-        if self._cache_hash is None or self.nonce != self._cache_val:
+        if True or (self._cache_hash is None or self.nonce != self._cache_val):
             self._cache_hash = sha256(
                 self.nonce.to_bytes(Block.BYTE_COUNTS[0], ENDIAN) + self._inner_hash()
             )
@@ -547,6 +701,7 @@ class NonceMiningJobHandler:
     def __init__(self):
         self.queued_jobs = []
         self._killed = threading.Event()
+        self._job_killed = threading.Event()
         self.worker = threading.Thread(target=self._worker, daemon=True)
         self.worker.start()
 
@@ -572,6 +727,9 @@ class NonceMiningJobHandler:
         self._killed.set()
         self.worker.join()
 
+    def kill_current_job(self):
+        self._job_killed.set()
+
     def __del__(self):
         self.kill()
 
@@ -584,6 +742,8 @@ class NonceMiningJobHandler:
             while not self.queued_jobs:
                 if self._killed.is_set():
                     return
+                if self._job_killed.is_set():
+                    self._job_killed.clear()
                 thread_yield()
             block, use_cuda_miner, valid_block_max_hash, init_nonce, val_reward = (
                 self.queued_jobs[0]
@@ -598,11 +758,12 @@ class NonceMiningJobHandler:
                         "CUDA miner not loaded; did you forget to call load_cuda_miner?"
                     )
                 h = int.from_bytes(block._inner_hash(), ENDIAN)
+
                 nonce_out = _cuda_miner_mod.mine(
                     _cuda_miner_fixed_launch_config_kernel,
                     h,
                     valid_block_max_hash,
-                    self._killed,
+                    LinkedEvent(self._killed, self._job_killed),
                     init_nonce,
                 )
                 if nonce_out is not None:
@@ -620,15 +781,18 @@ class NonceMiningJobHandler:
                     block.version,
                     val_reward,
                 )
-                while not self._killed.is_set() and not is_valid_block(
-                    block_, valid_block_max_hash
+                while (
+                    not self._killed.is_set()
+                    and not self._job_killed.is_set()
+                    and not is_valid_block(block_, valid_block_max_hash)
                 ):
                     block_.nonce = (block_.nonce + 1) % (1 << (NONCE_SIZE_BYTES * 8))
-                if not self._killed.is_set():
+                if not self._killed.is_set() and not self._job_killed.is_set():
                     block.nonce = block_.nonce
 
             _global_lock.acquire()
             self.queued_jobs.pop(0)
+            self._job_killed.clear()
             _global_lock.release()
 
 
@@ -667,18 +831,142 @@ def chain_to_bytes(chain: "Block") -> bytes:
     return b"".join(block.to_bytes() for block in reversed_block_list(chain))
 
 
-class OpenBlock:
+class TransactionPool:
     def __init__(
         self,
-        prev: Optional["Block"],
+        chain: "Shared[Block]",
         validator: bytes,
-        transactions: List["Transaction"] = None,
+        pool: Set["Transaction"] = None,
+        get_padding_transaction: Optional[Callable[[], "Transaction"]] = None,
     ):
-        if transactions is None:
-            transactions = []
+        if pool is None:
+            pool = set()
         self.validator = validator
-        self.transactions = transactions
-        self.prev = prev
+        self.chain = chain
+        self.pool = pool
+        self.nonce_mining_job_handler = NonceMiningJobHandler()
+        self.get_padding_transaction_f = get_padding_transaction
+        self._current_job = None
+
+    def update_job(
+        self,
+        use_cuda_miner: bool,
+        valid_block_max_hash: int,
+        val_reward: int,
+        init_nonce: int,
+        balances: Dict[bytes, int],
+        invalidated_timestamps: Set[bytes],
+        const_transaction_fee: int,
+        relative_transaction_fee: float,
+        max_timestamp_now_diff: int,
+        min_income_to_mine: int,
+        version: int = 0,
+    ):
+        prev_block_was_ready_at_start = True
+        if not block_is_ready(self.chain.x):
+            prev_block_was_ready_at_start = False
+            if balances.get(self.validator, 0) < val_reward:
+                raise RuntimeError(
+                    "Cannot undo coinbase-transaction: validator has too little currency. This is probably a bug. Please report to developer."
+                )
+            balances[self.validator] = balances.get(self.validator, 0) - val_reward
+            for t in reversed(self.chain.x.transactions):
+                undo_transaction(t, self.validator, balances, invalidated_timestamps)
+                # they were removed from the pool when they were put into the last block, but since that is still
+                # being mined and will be thrown away if there is a different set of transactions to be mined now,
+                # I must add all these transactions back in.
+                self.pool.add(t)
+
+        while True:
+            if self.get_padding_transaction_f is None and len(self.pool) < Block.SIZE:
+                return
+            transactions_to_mine = select_top_transactions(self.pool, Block.SIZE) + [
+                self.get_padding_transaction_f()
+                for _ in range(Block.SIZE - len(self.pool))
+            ]
+
+            for i, t in enumerate(transactions_to_mine):
+                if not t.is_valid(
+                    balances,
+                    invalidated_timestamps,
+                    const_transaction_fee,
+                    relative_transaction_fee,
+                    None,
+                    max_timestamp_now_diff,
+                ):
+                    # remove invalid transaction and rerun
+                    self.pool.remove(t)
+                    for j in reversed(range(i)):
+                        undo_transaction(
+                            transactions_to_mine[j],
+                            self.validator,
+                            balances,
+                            invalidated_timestamps,
+                        )
+                    break
+                execute_transaction(t, self.validator, balances, invalidated_timestamps)
+
+            else:
+                if (
+                    sum(
+                        map(
+                            lambda t: t.fee,
+                            filter(lambda t: not t._is_padding, transactions_to_mine),
+                        ),
+                        start=val_reward,
+                    )
+                    >= min_income_to_mine
+                ) and self._current_job != (self.chain.x, transactions_to_mine):
+                    self._current_job = self.chain.x, transactions_to_mine
+                    self.nonce_mining_job_handler.kill_current_job()
+                    while self.nonce_mining_job_handler.is_mining:
+                        thread_yield()
+
+                    _global_lock.acquire()
+
+                    prev_block_is_ready = block_is_ready(self.chain.x)
+                    # avoid a race condition where the mining of prev block has finished during this computation
+                    # since the transactions of that block were added back to the pool in preparation of the running
+                    # block being killed and replaced by a better one (other transactions to be mined).
+                    # however, now those transactions are already in the blockchain and must not be considered.
+                    # we have to rerun without considering these transactions.
+                    if prev_block_is_ready and not prev_block_was_ready_at_start:
+                        # reset all changes made to the balances in this loop run
+                        for t in reversed(transactions_to_mine):
+                            undo_transaction(
+                                t, self.validator, balances, invalidated_timestamps
+                            )
+                        for t in self.chain.x.transactions:
+                            self.pool.remove(t)
+                            execute_transaction(
+                                t, self.validator, balances, invalidated_timestamps
+                            )
+                        _global_lock.release()
+                        continue
+
+                    # remove selected transactions from pool since they are now in new block
+                    for t in transactions_to_mine:
+                        self.pool.remove(t)
+
+                    self.chain.x = Block(
+                        transactions_to_mine,
+                        (  # if last block is work-in-progress, throw it away and replace it, otherwise, extend chain
+                            self.chain.x if prev_block_is_ready else self.chain.x.prev
+                        ),
+                        self.validator,
+                        version=version,
+                        val_reward=val_reward,
+                    )
+                    _global_lock.release()
+
+                    self.nonce_mining_job_handler.launch_job(
+                        self.chain.x,
+                        use_cuda_miner,
+                        valid_block_max_hash,
+                        val_reward,
+                        init_nonce,
+                    )
+                break
 
     def receive(
         self,
@@ -687,31 +975,44 @@ class OpenBlock:
         invalidated_timestamps: set[bytes],
         const_transaction_fee: int,
         relative_transaction_fee: float,
+        use_cuda_miner: bool,
+        valid_block_max_hash: int,
         val_reward: int,
+        init_nonce: int,
+        min_income_to_mine: int,
         transaction_sane: bool = None,
         max_timestamp_now_diff: int = -1,
-    ) -> tuple[bool, bool]:
+        version: int = 0,
+    ) -> tuple[bool, "FeedbackCode"]:
         transaction.recv_time = time.time_ns().to_bytes(
             Transaction.BYTE_COUNTS[5], ENDIAN
         )
-        if not transaction.is_valid(
+        if (
+            transaction_sane is None
+            and not transaction.is_sane(const_transaction_fee, relative_transaction_fee)
+            or transaction_sane is False
+        ):
+            return False, FeedbackCode.TRANSACTION_INSANE
+        self.pool.add(transaction)
+        self.update_job(
+            use_cuda_miner,
+            valid_block_max_hash,
+            val_reward,
+            init_nonce,
             balances,
             invalidated_timestamps,
             const_transaction_fee,
             relative_transaction_fee,
-            transaction_sane,
             max_timestamp_now_diff,
-        ):
-            return False, False
-        self.transactions.append(transaction)
-        execute_transaction(
-            transaction, self.validator, balances, invalidated_timestamps
+            min_income_to_mine,
+            version,
         )
-        if len(self.transactions) < Block.SIZE:
-            return False, True
-        else:
-            balances[self.validator] = balances.get(self.validator, 0) + val_reward
-            return True, True
+        accepted = transaction in self.pool
+        return accepted, (
+            FeedbackCode.TRANSACTION_ACCEPTED
+            if accepted
+            else FeedbackCode.TRANSACTION_REJECTED_BUT_SANE
+        )
 
 
 def get_received_transactions(
@@ -924,6 +1225,10 @@ def _mine(
     :param get_padding_transaction: Optional function that takes no args and returns a new padding transaction (= transaction from validator_wallet_1 to validator_wallet_2)
     :param min_income_to_mine: The minimum amount of income a miner has to make from the transaction pool to mine it (to avoid power consumption exceeding gain)
     """
+    # TODO add parameter for TransactionPool, send out TransactionPool via side channel when terminating
+    # and save TransactionPool and pass it back in when running this function again. Also verify validity of all
+    # transactions in the pool.
+
     if cuda_miner_load_args is not None:
         load_cuda_miner(*cuda_miner_load_args)
 
@@ -932,7 +1237,7 @@ def _mine(
     assert max_recv_chains_per_iter != 0, "max_recv_chains_per_iter cannot be 0"
     assert max_recv_blocks_per_iter != 0, "max_recv_blocks_per_iter cannot be 0"
     assert isinstance(min_income_to_mine, int)
-    assert min_income_to_mine >= -1
+    assert min_income_to_mine >= 0
     assert (
         max_recv_transactions_per_iter != 0
     ), "max_recv_transactions_per_iter cannot be 0"
@@ -1014,29 +1319,17 @@ def _mine(
     if init_balances is None:
         init_balances = {}
 
-    open_block = OpenBlock(chain, validator)
+    chain = Shared(chain)
+    transaction_pool = TransactionPool(chain, validator)
     transaction_backlog = [[]] * transaction_backlog_size
-    mining_job_handler = NonceMiningJobHandler()
     updated_chain = False
     replaced_chain = False
     last_loop_time_ns = 0
     last_block_balances = balances.copy()
-    n_unready_blocks = get_n_unready_blocks(chain)
+    block_hashes = [block.hash() for block in block_list(chain.x)]
 
-    unverified_blocks = []
-    i = chain
-    while i != vsc:
-        unverified_blocks.append(i)
-        i = i.prev
-    for b in reversed(unverified_blocks):
-        for t in b.transactions:
-            execute_transaction(t, validator, balances, invalidated_timestamps)
-        mining_job_handler.launch_job(
-            b,
-            use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
-            valid_block_max_hash,
-            int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
-        )
+    if chain.x != vsc:
+        raise ValueError("initial chain has unverified blocks")
 
     while terminate_event is None or not terminate_event.is_set():
         while time.time_ns() - last_loop_time_ns < collect_time and (
@@ -1044,7 +1337,7 @@ def _mine(
         ):
             thread_yield()
         last_loop_time_ns = time.time_ns()
-        current_chain_len = chain_len(chain)
+        current_chain_len = chain_len(chain.x)
 
         # receive new chains
         recv_chains, recv_chain_bytes = get_received_chains(
@@ -1064,11 +1357,11 @@ def _mine(
                 valid_block_max_hash,
                 max_timestamp_now_diff,
             )
-            if side_channel is not None:
+            if side_channel is not None and not is_valid:
                 broadcast_side_channel(
                     side_channel,
-                    SideChannelItemType.CHAIN_VALIDITY_PAIR,
-                    (chain_bytes, is_valid),
+                    SideChannelItemType.CHAIN_FEEDBACK_PAIR,
+                    (chain_bytes, FeedbackCode.CHAIN_INVALID),
                 )
             # if chains are equivalent, trust them more than if the result is different
             if is_valid and (
@@ -1080,6 +1373,11 @@ def _mine(
                     and new_balances == balances
                 )
             ):
+                broadcast_side_channel(
+                    side_channel,
+                    SideChannelItemType.CHAIN_FEEDBACK_PAIR,
+                    (chain_bytes, FeedbackCode.CHAIN_ACCEPTED),
+                )
                 favorite_new_chain_data = (
                     recv_chain,
                     new_balances,
@@ -1089,12 +1387,17 @@ def _mine(
                     new_chain_len - current_chain_len - incompatible_chain_distrust + 1,
                     new_chain_len - current_chain_len - compatible_chain_distrust + 1,
                 )
+            else:
+                broadcast_side_channel(
+                    side_channel,
+                    SideChannelItemType.CHAIN_FEEDBACK_PAIR,
+                    (chain_bytes, FeedbackCode.CHAIN_VALID_BUT_NOT_ACCEPTED),
+                )
         if favorite_new_chain_data[0] is not None:
             chain, balances, invalidated_timestamps = favorite_new_chain_data
+            chain = Shared(chain)
             last_block_balances = balances.copy()
-            mining_job_handler.kill()
-            mining_job_handler = NonceMiningJobHandler()
-            open_block = OpenBlock(chain, validator)
+            transaction_pool = TransactionPool(chain, validator)
             replaced_chain = True
             updated_chain = True
 
@@ -1111,8 +1414,8 @@ def _mine(
                 if side_channel is not None:
                     broadcast_side_channel(
                         side_channel,
-                        SideChannelItemType.BLOCK_VALIDITY_PAIR,
-                        (block_bytes, False),
+                        SideChannelItemType.BLOCK_FEEDBACK_PAIR,
+                        (block_bytes, FeedbackCode.BLOCK_REJECTED),
                     )
                 continue
 
@@ -1133,32 +1436,27 @@ def _mine(
             if side_channel is not None:
                 broadcast_side_channel(
                     side_channel,
-                    SideChannelItemType.BLOCK_VALIDITY_PAIR,
-                    (block_bytes, is_valid),
+                    SideChannelItemType.BLOCK_FEEDBACK_PAIR,
+                    (
+                        block_bytes,
+                        (
+                            FeedbackCode.BLOCK_ACCEPTED
+                            if is_valid
+                            else FeedbackCode.BLOCK_REJECTED
+                        ),
+                    ),
                 )
             if is_valid:
-                recv_block.prev = chain
-                chain = recv_block
+                recv_block.prev = chain.x
+                chain = Shared(recv_block)
                 balances = new_balances
                 last_block_balances = balances.copy()
                 invalidated_timestamps = new_invalidated_timestamps
-                mining_job_handler.kill()
-                mining_job_handler = NonceMiningJobHandler()
-                open_block = OpenBlock(chain, validator)
+                transaction_pool = TransactionPool(chain, validator)
                 replaced_chain = True
                 updated_chain = True
 
         # receive new transactions
-        # TODO currently, I just get the received transactions and start mining when I have enough.
-        # This does not maximize mining reward, therefore, I should instead collect all received transactions into a
-        # set. Then, I should take the n biggest transactions from that set and mine with those.
-        # When new transactions arrive, I should check the value of the smallest transaction being mined and compare
-        # to the max in the set (the "transaction pool"). Then, if the min is less than the max, I should stop the
-        # mining process and re-select the transactions I am mining with. Also, I should only have one active mining job
-        # instead of multiple ones in a queue. On terminate, I could also write out the transaction pool through the
-        # side channel to preserve them (and add a new input argument for it).
-        # TODO convert OpenBlock into a transaction pool (see above TODO)
-        # TODO use min_income_to_mine to determine whether to even mine the current pool
         recv_trans, recv_trans_bytes = get_received_transactions(
             transaction_recv_channel, max_recv_transactions_per_iter
         )
@@ -1171,73 +1469,61 @@ def _mine(
                 if not sane:
                     broadcast_side_channel(
                         side_channel,
-                        SideChannelItemType.TRANSACTION_VALIDITY_PAIR,
-                        (t_bytes, False),
+                        SideChannelItemType.TRANSACTION_FEEDBACK_PAIR,
+                        (t_bytes, FeedbackCode.TRANSACTION_INSANE),
                     )
         filtered_recv_transactions_and_bytes = [
             (t, t_bytes)
             for t, t_bytes, sane in zip(recv_trans, recv_trans_bytes, t_is_sane)
             if sane
         ]
-        # sorting transactions helps avoid incompatible chains due to different transaction orders
-        recv_sane_transactions_and_bytes = sorted(
+        transactions = sorted(
             filtered_recv_transactions_and_bytes,
-            key=lambda t_and_bytes: t_and_bytes[0].fee,
-            reverse=True,
+            key=lambda t_and_bytes: int.from_bytes(t_and_bytes[0].timestamp, ENDIAN),
         )
-        transactions = recv_sane_transactions_and_bytes
         if replaced_chain:
             transactions = sum(transaction_backlog, start=[]) + transactions
         for transaction, t_bytes in transactions:
             if transaction_backlog_size:
                 transaction_backlog[-1].append(transaction)
-            is_closed, is_valid_t = open_block.receive(
+            is_valid_t = transaction_pool.receive(
                 transaction,
                 balances,
                 invalidated_timestamps,
                 const_min_transaction_fee,
                 relative_min_transaction_fee,
+                use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
+                valid_block_max_hash,
                 val_reward,
+                int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
+                min_income_to_mine,
                 True,
                 max_timestamp_now_diff,
+                version,
             )
             if side_channel is not None:
                 broadcast_side_channel(
                     side_channel,
-                    SideChannelItemType.TRANSACTION_VALIDITY_PAIR,
-                    (t_bytes, is_valid_t),
+                    SideChannelItemType.TRANSACTION_FEEDBACK_PAIR,
+                    (
+                        t_bytes,
+                        (
+                            FeedbackCode.TRANSACTION_ACCEPTED
+                            if is_valid_t
+                            else FeedbackCode.TRANSACTION_REJECTED_BUT_SANE
+                        ),
+                    ),
                 )
-            if is_closed:
-                # NOTE: sorting makes miner network more resilient against potential problems caused by blocks being
-                # received in different orders by different miners
-                sorted_transactions = sorted(
-                    open_block.transactions, key=lambda t: t.amount, reverse=True
-                )
-                chain = Block(
-                    sorted_transactions,
-                    chain,
-                    validator,
-                    version=version,
-                    val_reward=val_reward,
-                )
-                last_block_balances = balances.copy()
-                mining_job_handler.launch_job(
-                    chain,
-                    use_cuda_miner_event is not None and use_cuda_miner_event.is_set(),
-                    valid_block_max_hash,
-                    val_reward,
-                    int.from_bytes(random.randbytes(NONCE_SIZE_BYTES), ENDIAN),
-                )
-                open_block = OpenBlock(chain, validator)
-                # remove those that were just closed
-                transaction_backlog.pop(0)
-                transaction_backlog.append([])
-                updated_chain = True
+            last_block_balances = balances.copy()
+            # remove those that were just closed
+            transaction_backlog.pop(0)
+            transaction_backlog.append([])
+            updated_chain = updated_chain or current_chain_len != chain_len(chain.x)
 
-        new_n_unready_blocks = get_n_unready_blocks(chain)
-        if updated_chain and new_n_unready_blocks != n_unready_blocks:
-            n_unready_blocks = new_n_unready_blocks
-            broadcast_chain(chain_broadcast_channel, chain, broadcast_chain_as_bytes)
+        new_block_hashes = [block.hash() for block in block_list(chain.x)]
+        if new_block_hashes != block_hashes:
+            block_hashes = new_block_hashes
+            broadcast_chain(chain_broadcast_channel, chain.x, broadcast_chain_as_bytes)
             broadcast_balances(
                 balance_broadcast_channel,
                 last_block_balances,
@@ -1246,7 +1532,6 @@ def _mine(
             )
             updated_chain = False
 
-    mining_job_handler.kill()
     if has_terminated_event is not None:
         has_terminated_event.set()
 

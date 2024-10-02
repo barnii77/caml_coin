@@ -72,7 +72,8 @@ class BlockchainTests(unittest.TestCase):
             target=blockchain._mine,
             args=blockchain_args,
             kwargs={
-                "valid_block_max_hash": 0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+                "valid_block_max_hash": 0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+                "min_income_to_mine": 0,
             },
         )
         if USE_CUDA:
@@ -82,7 +83,10 @@ class BlockchainTests(unittest.TestCase):
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
             import time
             import random
-            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
+
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(
+                blockchain.Transaction.BYTE_COUNTS[4], "little"
+            )
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -131,7 +135,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(80)
+        time.sleep(120)
         terminate_event.set()
         blockchain_thread.join()
         balances = {
@@ -173,7 +177,8 @@ class BlockchainTests(unittest.TestCase):
             None,
             init_balance,
             blockchain.MiningConfig(
-                valid_block_max_hash=0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+                valid_block_max_hash=0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+                min_income_to_mine=0,
             ),
             "threading",
         )
@@ -183,7 +188,10 @@ class BlockchainTests(unittest.TestCase):
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
             import time
             import random
-            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
+
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(
+                blockchain.Transaction.BYTE_COUNTS[4], "little"
+            )
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -232,7 +240,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(80)
+        time.sleep(120)
         _, balances = chain_handler.finish()
         balances = blockchain.deserialize_balances(balances)
         balances = {
@@ -270,7 +278,8 @@ class BlockchainTests(unittest.TestCase):
         }
 
         mining_config = blockchain.MiningConfig(
-            valid_block_max_hash=0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+            valid_block_max_hash=0x00000003FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+            min_income_to_mine=0,
         )
         chain_handler = blockchain.Miner(
             name_to_private_public_key(b"name5")[1],
@@ -285,7 +294,10 @@ class BlockchainTests(unittest.TestCase):
         def get_test_transaction(sender: bytes, receiver: bytes, amount: int):
             import time
             import random
-            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(blockchain.Transaction.BYTE_COUNTS[4], "little")
+
+            timestamp_bytes = (time.time_ns() + random.randrange(0, 200)).to_bytes(
+                blockchain.Transaction.BYTE_COUNTS[4], "little"
+            )
             # generate signature by concatenating sender, receiver, amount, uuid and signing with private key
             private_key_sender, public_key_sender = name_to_private_public_key(sender)
             _, public_key_receiver = name_to_private_public_key(receiver)
@@ -359,7 +371,7 @@ class BlockchainTests(unittest.TestCase):
 
         import time
 
-        time.sleep(80)
+        time.sleep(150)
         chain_bytes, balances = chain_handler.finish()
         balances = blockchain.deserialize_balances(balances)
         balances = {
@@ -376,8 +388,8 @@ class BlockchainTests(unittest.TestCase):
                 mining_config.const_transaction_fee,
                 mining_config.relative_transaction_fee,
                 mining_config.valid_block_max_hash,
-                mining_config.max_timestamp_now_diff
-            )
+                mining_config.max_timestamp_now_diff,
+            )[0]
         )
         self.assertEqual(blockchain.chain_len(chain), 3)
         balances_values = list(balances.values())
