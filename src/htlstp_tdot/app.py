@@ -110,6 +110,7 @@ def login():
 def logout():
     users.pop(current_user.id)
     logout_user()
+    return render_template("logged_out.html"), 200
 
 
 @app.route("/oauth_callback")
@@ -177,6 +178,8 @@ def sell():
 
 @app.route("/index")
 def index():
+    if not current_user.is_authenticated:
+        return redirect(url_for("login")), 200
     user_id = current_user.id
     info = get_user_info(user_id)
     return (
