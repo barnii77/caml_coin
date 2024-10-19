@@ -217,6 +217,7 @@ class MarketSim:
         seed=None,
         freqs: Optional[Union[list, int]] = 8,
         event_impact=1.0,
+        event_prob=0.05,
     ):
         if freqs is None:
             freqs = 8
@@ -230,6 +231,7 @@ class MarketSim:
         self.decay_factor = decay_factor
         self.stddev = stddev
         self.seed = seed
+        self.event_prob = event_prob
         self.event_impact = event_impact
         if seed is not None:
             random.seed(seed)
@@ -289,7 +291,7 @@ class MarketSim:
                 self._resample_all_noise()
 
         # Handle events
-        if random.random() < 0.05:  # 5% chance for an event
+        if random.random() < self.event_prob:
             sentiment, message = get_market_event()
             self._handle_event(sentiment)
 
@@ -322,7 +324,8 @@ class MarketSim:
 #     stddev=0.04,
 #     freqs=[1, 2, 4, 8, 32, 64, 128, 256, 512],
 #     decay_factor=0.96,
-#     event_impact=0.45,
+#     event_impact=1.25,
+#     event_prob=0.02,
 # )
 #
 # # Prepare the figure and axis
@@ -362,5 +365,5 @@ class MarketSim:
 #     fig, update, frames=range(1000), init_func=init, blit=True, interval=50
 # )
 #
-# ani.save("market_simulation.mp4", writer="ffmpeg", fps=30)
+# # ani.save("market_simulation.mp4", writer="ffmpeg", fps=30)
 # plt.show()
