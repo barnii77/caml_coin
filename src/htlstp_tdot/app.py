@@ -34,8 +34,11 @@ sim = market.MarketSim(
     event_prob=0.02,
 )
 sim_data = []
+next_market_step = 0
 SIM_DATA_BACKLOG_SIZE = 50_000
+SIM_BATCH_SIZE = 10  # how many steps are computed in one go to avoid locking too often
 users = {}
+sim_data_lock = threading.Lock()
 with open("config.json") as f:
     config = json.load(f)
 # convert the json repr of beff jezos into a CamlCoinUserInfo object
@@ -47,10 +50,14 @@ api_headers = {"Authentication": f"Bearer {config['api_key']}"}
 
 
 def run_sim():
+    global next_market_step
     while True:
-        sim_data.append(sim.step())
-        while len(sim_data) > SIM_DATA_BACKLOG_SIZE:
-            sim_data.pop(0)
+        with sim_data_lock:
+            for i in range(SIM_BATCH_SIZE):
+                sim_data.append(sim.step())
+                while len(sim_data) > SIM_DATA_BACKLOG_SIZE:
+                    sim_data.pop(0)
+                next_market_step += 1
 
 
 def user_get_available_points(user_id):
@@ -158,7 +165,7 @@ def logged_out():
     return render_template("logged_out.html"), 200
 
 
-@app.route("/oauth_callback")
+@app.route("/oauth/callback")
 def oauth_callback():
     state = request.args.get("state")
     user_id = request.args.get("userId")
@@ -230,20 +237,49 @@ def sell():
 
 @app.route("/api/market/current-exchange-rate")
 def api_route_get_coins_to_points_exchange_rate():
-    return jsonify(exchange_rate=get_coins_to_points_exchange_rate()), 200
+    with sim_data_lock:
+        return (
+            jsonify(
+                exchange_rate=get_coins_to_points_exchange_rate(),
+                next_market_step=next_market_step,
+            ),
+            200,
+        )
 
 
 @app.route("/api/market/latest-steps/<int:n>")
-def get_latest_n_coins_to_points_exchange_rates(n: int):
-    if n > SIM_DATA_BACKLOG_SIZE:
-        return jsonify_error(f"n exceeds backlog size of {SIM_DATA_BACKLOG_SIZE}"), 400
-    return (
-        jsonify(
-            exchange_rates=sim_data_to_json(sim_data[-n:]),
-            n_retrieved=min(len(sim_data), n),
-        ),
-        200,
-    )
+def api_route_get_latest_n_market_steps(n: int):
+    with sim_data_lock:
+        if n > SIM_DATA_BACKLOG_SIZE:
+            return jsonify_error(f"n exceeds backlog size of {SIM_DATA_BACKLOG_SIZE}"), 400
+        return (
+            jsonify(
+                market_steps=sim_data_to_json(sim_data[-n:]),
+                n_retrieved=min(len(sim_data), n),
+                next_market_step=next_market_step,
+            ),
+            200,
+        )
+
+
+@app.route("/api/market/steps-since/<int:n>")
+def api_route_get_market_steps_since(n: int):
+    with sim_data_lock:
+        if n >= next_market_step:
+            return (
+                jsonify_error(
+                    f"n exceeds or is equal to the index of the next market step ({next_market_step}), which has not been simulated yet"
+                ),
+                400,
+            )
+        return (
+            jsonify(
+                market_steps=sim_data_to_json(sim_data[n - next_market_step:]),
+                n_retrieved=min(len(sim_data), n),
+                next_market_step=next_market_step,
+            ),
+            200,
+        )
 
 
 @app.route("/")

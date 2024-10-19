@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from typing import Union, Optional
 
-# Updated lists of names with more prominent tech figures and investors
 first_names = [
     "Satoshi",
     "Vitalik",
@@ -123,7 +122,6 @@ platforms = [
     "Threads",
 ]
 
-# Extended positive sentences
 positive_sentences = [
     "This coin is like a rocket ship to the moon, you better hop on!",
     "The community is so strong, they could crowdfund a moon colony.",
@@ -147,7 +145,6 @@ positive_sentences = [
     "You can feel the gains just by holding it in your wallet.",
 ]
 
-# Extended negative sentences
 negative_sentences = [
     "This coin’s future is as bright as a broken lightbulb.",
     "It’s about as decentralized as a pizza shop.",
