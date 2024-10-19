@@ -137,7 +137,7 @@ positive_sentences = [
     "You know it’s good when even your taxi driver is asking how to buy some.",
     "It’s so green, it makes Tesla look like a coal mine.",
     "With this coin, even your pet could retire early.",
-    "Hodl this one, and you’ll need a second wallet for all the gains.",
+    "Hold this one, and you’ll need a second wallet for all the gains.",
     "This coin makes DeFi look like child's play.",
     "It's the most secure chain out there – hackers get scared just looking at it.",
     "Even whales are jealous of how big this coin is getting.",
