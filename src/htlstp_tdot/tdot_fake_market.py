@@ -111,7 +111,7 @@ last_names = [
 
 # Platforms for posting
 platforms = [
-    "Twitter",
+    "X",
     "Reddit",
     "LinkedIn",
     "Medium",
