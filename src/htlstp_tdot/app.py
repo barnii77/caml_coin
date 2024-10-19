@@ -2,6 +2,8 @@ import secrets
 import threading
 import math
 import json
+from typing import Union, Optional
+
 import tdot_fake_market as market
 import cc_utils
 import requests
@@ -94,12 +96,26 @@ def jsonify_redirect(url: str):
     return jsonify(redirect=url)
 
 
-def get_coins_to_points_exchange_course() -> float:
+def get_coins_to_points_exchange_rate() -> float:
     return sim.price
 
 
-def get_points_to_coins_exchange_course() -> float:
+def get_points_to_coins_exchange_rate() -> float:
     return 1 / sim.price
+
+
+def sim_data_to_json(
+    data: list[tuple[int, tuple[str, str]]]
+) -> list[dict[str, Union[int, Optional[dict[str, str]]]]]:
+    return [
+        {
+            "exchange_rate": x[0],
+            "event": (
+                {"sentiment": x[1][0], "message": x[1][1]} if x[1] is not None else None
+            ),
+        }
+        for x in data
+    ]
 
 
 class User(UserMixin):
@@ -165,7 +181,7 @@ def buy():
         return jsonify_error("Unable to retrieve your point score"), 400
     if user_amount_available >= amount:
         user_info = user_management.get_user_info(user_id)
-        n_coins_bought = int(int(amount) * get_points_to_coins_exchange_course())
+        n_coins_bought = int(int(amount) * get_points_to_coins_exchange_rate())
         try:
             cc_utils.send_coins(
                 config["beff_jezos_user_info"], user_info.public_key, n_coins_bought
@@ -173,7 +189,7 @@ def buy():
         except Exception:
             return jsonify_error("Exception occured while processing request"), 400
         withdraw_points(
-            user_id, math.ceil(n_coins_bought * get_coins_to_points_exchange_course())
+            user_id, math.ceil(n_coins_bought * get_coins_to_points_exchange_rate())
         )
         return (
             jsonify(
@@ -197,7 +213,7 @@ def sell():
     if user_amount_available is None:
         return jsonify_error("Unable to retrieve your point score"), 400
     if user_amount_available >= amount:
-        n_points_to_recv = int(int(amount) * get_coins_to_points_exchange_course())
+        n_points_to_recv = int(int(amount) * get_coins_to_points_exchange_rate())
         try:
             cc_utils.send_coins(
                 user_info, config["beff_jezos_user_info"].public_key, int(amount)
@@ -212,16 +228,22 @@ def sell():
     return jsonify_error("Too few coins"), 400
 
 
-@app.route("/api/exchange-course/current")
-def get_coins_to_points_exchange_course():
-    return jsonify(exchange_course=get_coins_to_points_exchange_course()), 200
+@app.route("/api/market/current-exchange-rate")
+def api_route_get_coins_to_points_exchange_rate():
+    return jsonify(exchange_rate=get_coins_to_points_exchange_rate()), 200
 
 
-@app.route("/api/exchange-course/latest/<int:n>")
-def get_latest_n_coins_to_points_exchange_courses(n: int):
+@app.route("/api/market/latest-steps/<int:n>")
+def get_latest_n_coins_to_points_exchange_rates(n: int):
     if n > SIM_DATA_BACKLOG_SIZE:
         return jsonify_error(f"n exceeds backlog size of {SIM_DATA_BACKLOG_SIZE}"), 400
-    return jsonify(exchange_courses=sim_data[-n:]), 200
+    return (
+        jsonify(
+            exchange_rates=sim_data_to_json(sim_data[-n:]),
+            n_retrieved=min(len(sim_data), n),
+        ),
+        200,
+    )
 
 
 @app.route("/")
@@ -241,4 +263,4 @@ def index():
 if __name__ == "__main__":
     user_management.create_users_table()
     sim_thread = threading.Thread(target=run_sim)
-    app.run(debug=True)
+    app.run(host="0.0.0.0", debug=False)

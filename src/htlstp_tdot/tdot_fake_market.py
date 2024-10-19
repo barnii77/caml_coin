@@ -222,7 +222,7 @@ class MarketSim:
         if freqs is None:
             freqs = 8
         if isinstance(freqs, int):
-            freqs = [2 ** i for i in range(freqs)]
+            freqs = [2**i for i in range(freqs)]
         # Initialize market state
         self.market_boost = 1
         self.market_boost_increase_factor = market_boost_increase_factor
@@ -294,14 +294,22 @@ class MarketSim:
         if random.random() < self.event_prob:
             sentiment, message = get_market_event()
             self._handle_event(sentiment)
+        else:
+            sentiment, message = None, None
 
         self.step_counter += 1
-        return self.price
+        return self.price, (
+            (sentiment, message)
+            if sentiment is not None and message is not None
+            else None
+        )
 
     def _resample_all_noise(self):
         """Resample all noise values for every frequency."""
         for freq in self.noise_frequencies:
-            self.noise_values[freq][1] = 0.0001 + abs(random.gauss(0, self.stddev / 100))
+            self.noise_values[freq][1] = 0.0001 + abs(
+                random.gauss(0, self.stddev / 100)
+            )
             self.event_boost = 0
             self.market_boost = 1
         self.step_counter = 0
@@ -345,7 +353,7 @@ class MarketSim:
 #     """Update the plot with the next price."""
 #     # Get the next price from the simulation
 #     for i in range(10):
-#         price = sim.step()
+#         price = sim.step()[0]
 #         vs.append(price)
 #
 #         # Show only the last `window_size` points in the plot
