@@ -1,13 +1,11 @@
 import secrets
+import requests
 import threading
 import math
 import json
-from typing import Union, Optional
+import time
 
-import tdot_fake_market as market
-import cc_utils
-import requests
-import user_management
+from typing import Union, Optional
 from flask import Flask, url_for, redirect, request, render_template, jsonify
 from flask_login import (
     LoginManager,
@@ -24,40 +22,25 @@ app.secret_key = secrets.token_urlsafe(24)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
-sim = market.MarketSim(
-    market_boost_increase_factor=1.0,
-    seed=42,
-    stddev=0.04,
-    freqs=[1, 2, 4, 8, 32, 64, 128, 256, 512],
-    decay_factor=0.96,
-    event_impact=1.25,
-    event_prob=0.02,
-)
-sim_data = []
-next_market_step = 0
-SIM_DATA_BACKLOG_SIZE = 50_000
-SIM_BATCH_SIZE = 10  # how many steps are computed in one go to avoid locking too often
-users = {}
-sim_data_lock = threading.Lock()
-with open("config.json") as f:
-    config = json.load(f)
-# convert the json repr of beff jezos into a CamlCoinUserInfo object
-bjzs = config["beff_jezos_user_info"]
-config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
-    bjzs["user_id"], bjzs["private_key"], bjzs["public_key"]
-)
-api_headers = {"Authentication": f"Bearer {config['api_key']}"}
 
 
 def run_sim():
     global next_market_step
+    last_step_time = time.time()
     while True:
+        t = time.time()
+        ideal_batches = (t - last_step_time) * SIM_BATCHES_PER_SECOND
+        n_batches = int(ideal_batches)
         with sim_data_lock:
-            for i in range(SIM_BATCH_SIZE):
-                sim_data.append(sim.step())
-                while len(sim_data) > SIM_DATA_BACKLOG_SIZE:
-                    sim_data.pop(0)
-                next_market_step += 1
+            for _ in range(n_batches):
+                for _ in range(SIM_BATCH_SIZE):
+                    sim_data.append(sim.step())
+                    while len(sim_data) > SIM_DATA_BACKLOG_SIZE:
+                        sim_data.pop(0)
+                    next_market_step += 1
+        # only add the fraction of the difference that has actually resulted in steps to avoid skewing the tick rate
+        if ideal_batches > 0:
+            last_step_time += (t - last_step_time) * n_batches / ideal_batches
 
 
 def user_get_available_points(user_id):
@@ -148,6 +131,8 @@ def login():
     )
     if response.status_code == 200:
         redirect_url = response.json().get("redirect_uri")
+        if not redirect_url:
+            return "Error in authentication process: Your user id is invalid", 400
         return redirect(redirect_url), 200
     return "Error in authentication process", 500
 
@@ -251,7 +236,10 @@ def api_route_get_coins_to_points_exchange_rate():
 def api_route_get_latest_n_market_steps(n: int):
     with sim_data_lock:
         if n > SIM_DATA_BACKLOG_SIZE:
-            return jsonify_error(f"n exceeds backlog size of {SIM_DATA_BACKLOG_SIZE}"), 400
+            return (
+                jsonify_error(f"n exceeds backlog size of {SIM_DATA_BACKLOG_SIZE}"),
+                400,
+            )
         return (
             jsonify(
                 market_steps=sim_data_to_json(sim_data[-n:]),
@@ -274,7 +262,7 @@ def api_route_get_market_steps_since(n: int):
             )
         return (
             jsonify(
-                market_steps=sim_data_to_json(sim_data[n - next_market_step:]),
+                market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
                 n_retrieved=min(len(sim_data), n),
                 next_market_step=next_market_step,
             ),
@@ -297,6 +285,47 @@ def index():
 
 
 if __name__ == "__main__":
+    import tdot_fake_market as market
+    import cc_utils
+    import user_management
+
+    sim = market.MarketSim(
+        base_value=30.0,
+        bounce_back_value=10.0,
+        market_boost_increase_factor=1.0,
+        seed=42,
+        stddev=0.04,
+        freqs=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        extra_freq_weights=[1, 1, 1, 1, 1, 1, 1, 1, 1 / 2, 1 / 4, 1 / 8],
+        event_decay_factor=0.998,
+        event_impact=0.001,
+        event_boost_weight=100,
+        event_prob=0.01,
+        event_change_trend_min_stds_from_mean=1,
+        event_change_trend_weight=0.8,
+    )
+    SIM_BATCHES_PER_SECOND = 4  # num sim batches per second
+    sim_data = []
+    next_market_step = 0
+    SIM_DATA_BACKLOG_SIZE = 50_000
+    SIM_BATCH_SIZE = 10  # how many steps are computed in one go to avoid locking too often
+    users = {}
+    sim_data_lock = threading.Lock()
+    with open("config.json") as f:
+        config = json.load(f)
+    # convert the json repr of beff jezos into a CamlCoinUserInfo object
+    bjzs = config["beff_jezos_user_info"]
+    config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
+        bjzs["user_id"],
+        int(bjzs["private_key"], base=16).to_bytes(
+            cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
+        ),
+        int(bjzs["public_key"], base=16).to_bytes(
+            cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
+        ),
+    )
+    api_headers = {"Authentication": f"Bearer {config['api_key']}"}
     user_management.create_users_table()
     sim_thread = threading.Thread(target=run_sim)
-    app.run(host="0.0.0.0", debug=False)
+    sim_thread.start()
+    app.run(host="127.0.0.1", debug=True, use_reloader=False)

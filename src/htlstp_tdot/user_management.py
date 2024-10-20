@@ -1,7 +1,6 @@
 import sqlite3
+import cc_utils
 
-PRIVATE_KEY_SIZE = 32
-PUBLIC_KEY_SIZE = 33
 DATABASE_PATH = "users.db"
 
 
@@ -53,7 +52,7 @@ def get_user_keys(user_id):
 
 class CamlCoinUserInfo:
     def __init__(self, user_id, private_key: bytes, public_key: bytes):
-        if len(public_key) != PUBLIC_KEY_SIZE or len(private_key) != PRIVATE_KEY_SIZE:
+        if len(public_key) != cc_utils.PUBLIC_KEY_SIZE or len(private_key) != cc_utils.PRIVATE_KEY_SIZE:
             raise ValueError(
                 f"public key and private key must be 33 bytes and 32 bytes in length respectively, but are {len(public_key)} and {len(private_key)} bytes long"
             )

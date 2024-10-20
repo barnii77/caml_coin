@@ -1,3 +1,9 @@
 {
-  "points_service": "xyz.wos-was-i.gg"
+  "api_key": "abc",
+  "points_service": "http://127.0.0.1:8080",
+  "beff_jezos_user_info": {
+    "user_id": "",
+    "private_key": "0x834e46bb167a60aaeedcc66ab5c6d30a4e1fcb97fa780a9f43f45b90db0be400",
+    "public_key": "0x03320bffff58a62fdd4ab1f9f858285aa07896395a7435348fd2af4a1cbdcc9f3c"
+  }
 }

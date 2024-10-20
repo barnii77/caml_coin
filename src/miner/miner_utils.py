@@ -1,5 +1,6 @@
 import functools
 import threading
+import time
 
 from typing import Generic, TypeVar
 
@@ -12,7 +13,7 @@ T = TypeVar("T")
 
 def thread_yield():
     """Makes thread scheduler yield control (avoids busy waiting)."""
-    pass  # time.sleep(5 * NANOSECOND)
+    time.sleep(5 * NANOSECOND)
 
 
 def sha256(x: bytes) -> bytes:
@@ -34,26 +35,9 @@ def broken(reason):
     return decorator
 
 
-# def set_shared_methods(shared: "Shared"):
-#     # all methods of wrapped object (e.g. __add__) will be transferred out
-#     method_names = list(filter(lambda attr: callable(getattr(shared.x, attr)) and attr not in ("__init__", "__new__", "__del__", "x"), dir(shared.x)))
-#     for m in method_names:
-#         setattr(shared, m, getattr(shared.x, m))
-
-
 class Shared(Generic[T]):
     def __init__(self, x: T):
-        self._x = x
-        # set_shared_methods(self)
-
-    @property
-    def x(self):
-        return self._x
-
-    @x.setter
-    def x(self, value):
-        self._x = value
-        # set_shared_methods(self)
+        self.x = x
 
 
 class LinkedEvent(threading.Event):
