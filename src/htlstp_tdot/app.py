@@ -43,31 +43,30 @@ def run_sim():
             last_step_time += (t - last_step_time) * n_batches / ideal_batches
 
 
-def user_get_available_points(user_id):
-    return (
-        requests.get(
-            f"{config['points_service']}/api/public/user/points/{user_id}",
-            headers=api_headers,
-        )
-        .json()
-        .get("points")
+def user_get_available_points(user_id) -> int:
+    resp = requests.get(
+        f"{config['points_service']}/api/public/user/points/{user_id}",
+        headers=api_headers,
     )
+    return resp.json().get("points")
 
 
-def withdraw_points(user_id, amount: int):
-    return requests.post(
+def withdraw_points(user_id, amount: int) -> dict:
+    resp = requests.post(
         f"{config['points_service']}/api/public/user/withdraw",
         json.dumps({"userId": user_id, "points": amount}),
         headers=api_headers,
     )
+    return resp.json()
 
 
-def deposit_points(user_id, amount: int):
-    return requests.post(
+def deposit_points(user_id, amount: int) -> dict:
+    resp = requests.post(
         f"{config['points_service']}/api/public/user/deposit",
         json.dumps({"userId": user_id, "points": amount}),
         headers=api_headers,
     )
+    return resp.json()
 
 
 def jsonify_empty():
@@ -167,15 +166,16 @@ def oauth_callback():
 @login_required
 def buy():
     user_id = current_user.id
-    amount = request.form.get("amount_points_spent")
-    if amount is None or not amount.isdigit() or int(amount) <= 0:
+    n_coins_bought = request.form.get("amount_coins_bought")
+    if n_coins_bought is None or not n_coins_bought.isdigit() or int(n_coins_bought) <= 0:
         return jsonify_error("Invalid amount"), 400
+    n_coins_bought = int(n_coins_bought)
+    amount = n_coins_bought * get_coins_to_points_exchange_rate()
     user_amount_available = user_get_available_points(user_id)
     if user_amount_available is None:
         return jsonify_error("Unable to retrieve your point score"), 400
     if user_amount_available >= amount:
         user_info = user_management.get_user_info(user_id)
-        n_coins_bought = int(int(amount) * get_points_to_coins_exchange_rate())
         try:
             cc_utils.send_coins(
                 config["beff_jezos_user_info"], user_info.public_key, n_coins_bought
@@ -187,7 +187,7 @@ def buy():
         )
         return (
             jsonify(
-                coins_available=cc_utils.get_available_coins(user_info),
+                coins_available=cc_utils.get_available_coins(user_info.public_key),
                 n_coins_bought=n_coins_bought,
             ),
             200,
@@ -199,24 +199,27 @@ def buy():
 @login_required
 def sell():
     user_id = current_user.id
-    amount = request.form.get("amount_coins_sold")
-    if amount is None or not amount.isdigit() or int(amount) <= 0:
+    amount_coins = request.form.get("amount_coins_sold")
+    if amount_coins is None or not amount_coins.isdigit() or int(amount_coins) <= 0:
         return jsonify_error("Invalid amount"), 400
+    amount_coins = int(amount_coins)
     user_info = user_management.get_user_info(user_id)
-    user_amount_available = cc_utils.get_available_coins(user_info)
+    user_amount_available = cc_utils.get_available_coins(user_info.public_key)
     if user_amount_available is None:
         return jsonify_error("Unable to retrieve your point score"), 400
-    if user_amount_available >= amount:
-        n_points_to_recv = int(int(amount) * get_coins_to_points_exchange_rate())
+    if user_amount_available >= amount_coins:
+        n_points_to_recv = int(amount_coins * get_coins_to_points_exchange_rate())
         try:
             cc_utils.send_coins(
-                user_info, config["beff_jezos_user_info"].public_key, int(amount)
+                user_info, config["beff_jezos_user_info"].public_key, amount_coins
             )
         except Exception:
             return jsonify_error("Exception occured while processing request"), 400
         deposit_points(user_id, n_points_to_recv)
         return (
-            jsonify_update(coins_available=cc_utils.get_available_coins(user_info)),
+            jsonify_update(
+                coins_available=cc_utils.get_available_coins(user_info.public_key)
+            ),
             200,
         )
     return jsonify_error("Too few coins"), 400
@@ -272,6 +275,11 @@ def api_route_get_market_steps_since(n: int):
         )
 
 
+@app.route("/api/market/next-market-step")
+def api_route_get_next_market_step():
+    return jsonify(next_market_step=next_market_step), 200
+
+
 @app.route("/")
 @login_required
 def index():
@@ -279,7 +287,7 @@ def index():
     info = user_management.get_user_info(user_id)
     return (
         render_template(
-            "index.html", coins_available=cc_utils.get_available_coins(info)
+            "index.html", coins_available=cc_utils.get_available_coins(info.public_key)
         ),
         200,
     )
@@ -298,8 +306,8 @@ if __name__ == "__main__":
         stddev=0.04,
         freqs=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
         extra_freq_weights=[1, 1, 1, 1, 1, 1, 1, 1, 1 / 2, 1 / 4, 1 / 8],
-        event_decay_factor=0.998,
-        event_impact=0.001,
+        event_decay_factor=0.9999,
+        event_impact=0.05,
         event_boost_weight=100,
         event_prob=0.01,
         event_change_trend_min_stds_from_mean=1,
@@ -309,7 +317,9 @@ if __name__ == "__main__":
     sim_data = []
     next_market_step = 0
     SIM_DATA_BACKLOG_SIZE = 50_000
-    SIM_BATCH_SIZE = 10  # how many steps are computed in one go to avoid locking too often
+    SIM_BATCH_SIZE = (
+        10  # how many steps are computed in one go to avoid locking too often
+    )
     users = {}
     sim_data_lock = threading.Lock()
     with open("config.json") as f:
@@ -325,7 +335,7 @@ if __name__ == "__main__":
             cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
         ),
     )
-    api_headers = {"Authentication": f"Bearer {config['api_key']}"}
+    api_headers = {"Authorization": f"Bearer {config['api_key']}"}
     user_management.create_users_table()
     sim_thread = threading.Thread(target=run_sim)
     sim_thread.start()
