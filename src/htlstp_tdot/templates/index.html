@@ -5,6 +5,16 @@
     <title>index</title>
 </head>
 <body>
-hello, welcome to index
+<form action="/api/buy" method="POST">
+    <label for="number">Buy:</label>
+    <input type="number" id="number" name="amount_points_spent" required>
+    <button type="submit">Submit</button>
+</form>
+<form action="/api/sell" method="POST">
+    <label for="number">Sell:</label>
+    <input type="number" id="number" name="amount_coins_sold" required>
+    <button type="submit">Submit</button>
+</form>
+<a href="/logout">logout</a>
 </body>
 </html>

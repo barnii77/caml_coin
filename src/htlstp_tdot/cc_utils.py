@@ -1,10 +1,10 @@
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
 
 ENDIAN = "little"
 PRIVATE_KEY_SIZE = 32
 PUBLIC_KEY_SIZE = 33
+balances = {}
 
 
 def generate_ecdsa_key_pair() -> tuple[bytes, bytes]:
@@ -22,10 +22,13 @@ def generate_ecdsa_key_pair() -> tuple[bytes, bytes]:
     return private_key_bytes, public_key_bytes
 
 
-def send_coins(*_):
-    pass  # TODO
+def send_coins(sender_user_info, receiver_public_key, n):
+    if balances.setdefault(sender_user_info.public_key, 0) < n:
+        return
+    balances[receiver_public_key] = balances.get(receiver_public_key, 0) + n
+    balances[sender_user_info.public_key] -= n
 
 
 # TODO make this under the hood have a cache and a thread that overwrites the cache in the background
-def get_available_coins(*_):
-    pass  # TODO
+def get_available_coins(public_key):
+    return balances.get(public_key, 0)
