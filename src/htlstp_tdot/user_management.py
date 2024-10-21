@@ -47,7 +47,9 @@ def get_user_keys(user_id):
         if row:
             return {"private_key": row[0], "public_key": row[1]}
         else:
-            return None
+            priv, pub = cc_utils.generate_ecdsa_key_pair()
+            insert_user(user_id, priv, pub)
+            return {"private_key": priv, "public_key": pub}
 
 
 class CamlCoinUserInfo:

@@ -109,16 +109,16 @@ def sim_data_to_json(
 
 
 class User(UserMixin):
-    def __init__(self, id, state):
-        self.id = id
-        self.state = state
+    pass
 
 
 @login_manager.user_loader
-def load_user(user_id, user_state):
+def load_user(user_id):
     if user_id in users:
         return users[user_id]
-    return users.setdefault(User(user_id, user_state))
+    user = User()
+    user.id = user_id
+    return users.setdefault(user_id, user)
 
 
 @app.route("/login")
@@ -130,7 +130,7 @@ def login():
         points_service_url, params={"state": state, "redirect_uri": redirect_uri}
     )
     if response.status_code == 200:
-        redirect_url = response.json().get("redirect_uri")
+        redirect_url = response.json().get("value")
         if not redirect_url:
             return "Error in authentication process: Your user id is invalid", 400
         return redirect(redirect_url), 200
@@ -155,7 +155,9 @@ def oauth_callback():
     state = request.args.get("state")
     user_id = request.args.get("userId")
     if state and user_id:
-        user = User(user_id, state)
+        user = User()
+        user.id = user_id
+        users[user_id] = user
         login_user(user)
         return redirect(url_for("index")), 200
     return "Error in OAuth callback", 400
@@ -271,9 +273,8 @@ def api_route_get_market_steps_since(n: int):
 
 
 @app.route("/")
+@login_required
 def index():
-    if not current_user.is_authenticated:
-        return redirect(url_for("login")), 200
     user_id = current_user.id
     info = user_management.get_user_info(user_id)
     return (
