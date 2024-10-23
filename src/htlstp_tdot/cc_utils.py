@@ -1,3 +1,5 @@
+from multiprocessing.managers import Value
+
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -5,6 +7,10 @@ ENDIAN = "little"
 PRIVATE_KEY_SIZE = 32
 PUBLIC_KEY_SIZE = 33
 balances = {}
+
+
+class TooPoorException(Exception):
+    pass
 
 
 def generate_ecdsa_key_pair() -> tuple[bytes, bytes]:
@@ -24,11 +30,10 @@ def generate_ecdsa_key_pair() -> tuple[bytes, bytes]:
 
 def send_coins(sender_user_info, receiver_public_key, n):
     if balances.setdefault(sender_user_info.public_key, 0) < n:
-        return
+        raise TooPoorException("sender does not have enough money")
     balances[receiver_public_key] = balances.get(receiver_public_key, 0) + n
     balances[sender_user_info.public_key] -= n
 
 
-# TODO make this under the hood have a cache and a thread that overwrites the cache in the background
 def get_available_coins(public_key):
     return balances.get(public_key, 0)

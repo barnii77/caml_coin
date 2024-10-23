@@ -51,22 +51,20 @@ def user_get_available_points(user_id) -> int:
     return resp.json().get("points")
 
 
-def withdraw_points(user_id, amount: int) -> dict:
+def withdraw_points(user_id, amount: int):
     resp = requests.post(
         f"{config['points_service']}/api/public/user/withdraw",
-        json.dumps({"userId": user_id, "points": amount}),
+        json={"userId": user_id, "points": amount},
         headers=api_headers,
     )
-    return resp.json()
 
 
-def deposit_points(user_id, amount: int) -> dict:
+def deposit_points(user_id, amount: int):
     resp = requests.post(
         f"{config['points_service']}/api/public/user/deposit",
-        json.dumps({"userId": user_id, "points": amount}),
+        json={"userId": user_id, "points": amount},
         headers=api_headers,
     )
-    return resp.json()
 
 
 def jsonify_empty():
@@ -174,14 +172,16 @@ def buy():
     user_amount_available = user_get_available_points(user_id)
     if user_amount_available is None:
         return jsonify_error("Unable to retrieve your point score"), 400
-    if user_amount_available >= amount:
+    if amount > user_amount_available:
+        amount = user_amount_available
+    if amount > 0:
         user_info = user_management.get_user_info(user_id)
         try:
             cc_utils.send_coins(
                 config["beff_jezos_user_info"], user_info.public_key, n_coins_bought
             )
-        except Exception:
-            return jsonify_error("Exception occured while processing request"), 400
+        except Exception as e:
+            return jsonify_error("Exception occured while processing request: " + str(e)), 400
         withdraw_points(
             user_id, math.ceil(n_coins_bought * get_coins_to_points_exchange_rate())
         )
@@ -213,8 +213,8 @@ def sell():
             cc_utils.send_coins(
                 user_info, config["beff_jezos_user_info"].public_key, amount_coins
             )
-        except Exception:
-            return jsonify_error("Exception occured while processing request"), 400
+        except Exception as e:
+            return jsonify_error("Exception occured while processing request: " + str(e)), 400
         deposit_points(user_id, n_points_to_recv)
         return (
             jsonify_update(
@@ -313,7 +313,7 @@ if __name__ == "__main__":
         event_change_trend_min_stds_from_mean=1,
         event_change_trend_weight=0.8,
     )
-    SIM_BATCHES_PER_SECOND = 4  # num sim batches per second
+    SIM_BATCHES_PER_SECOND = 1  # num sim batches per second
     sim_data = []
     next_market_step = 0
     SIM_DATA_BACKLOG_SIZE = 50_000
@@ -325,16 +325,18 @@ if __name__ == "__main__":
     with open("config.json") as f:
         config = json.load(f)
     # convert the json repr of beff jezos into a CamlCoinUserInfo object
-    bjzs = config["beff_jezos_user_info"]
+    _beff_jezos: dict = config["beff_jezos_user_info"]
     config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
-        bjzs["user_id"],
-        int(bjzs["private_key"], base=16).to_bytes(
+        _beff_jezos["user_id"],
+        int(_beff_jezos["private_key"], base=16).to_bytes(
             cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
         ),
-        int(bjzs["public_key"], base=16).to_bytes(
+        int(_beff_jezos["public_key"], base=16).to_bytes(
             cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
         ),
     )
+    beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
+    cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
     api_headers = {"Authorization": f"Bearer {config['api_key']}"}
     user_management.create_users_table()
     sim_thread = threading.Thread(target=run_sim)
