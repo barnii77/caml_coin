@@ -1,8 +1,11 @@
 import random
 import math
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 
 first_names = [
+    "David",
+    "Daniel",
+    "Danid",
     "Satoshi",
     "Vitalik",
     "Charlie",
@@ -56,6 +59,9 @@ first_names = [
 ]
 
 last_names = [
+    "Harrer",
+    "Gastecker",
+    "Garrer",
     "Nakamura",
     "Buterin",
     "Hoskinson",
@@ -110,8 +116,13 @@ last_names = [
 # Platforms for posting
 platforms = [
     "X",
+    "X",
+    "X",
+    "X",
+    "X",
+    "X",
+    "X",
     "Reddit",
-    "LinkedIn",
     "Medium",
     "Facebook",
     "Instagram",
@@ -142,6 +153,29 @@ positive_sentences = [
     "If it were any more decentralized, it would dissolve into thin air. 🌀🔗",
     "This is the Lamborghini of cryptocurrencies. 🏎️💸",
     "You can feel the gains just by holding it in your wallet. 💼💹",
+    "This is the one coin that makes hodling feel like winning the lottery! 🎉💎",
+    "Get ready to see gains that make Wall Street jealous. 💹💸",
+    "It’s like owning a slice of the future – and it’s only going up from here. 🚀📈",
+    "The team behind this coin could probably launch a spaceship if they wanted to. 🚀🛠️",
+    "It’s more stable than your 9-to-5, with triple the upside. 💼📈",
+    "This project is making more partnerships than a Fortune 500 company! 🤝💼",
+    "It’s as if someone took the best ideas in crypto and wrapped them into one coin. 💡🔗",
+    "You can almost feel the innovation pulsing through the blockchain. 🔋💥",
+    "Even skeptics are starting to say, ‘Maybe I should get in on this.’ 💭📈",
+    "This is the kind of project that could make early adopters legends. 🏆👑",
+    "When in doubt, zoom out – the trajectory of this coin is sky-high. 📈🌌",
+    "Forget holding cash – this coin is the real safe haven. 🏦🔒",
+    "The dev team is so transparent, it feels like watching magic happen in real-time. 🔍✨",
+    "It’s the kind of investment that’ll have your grandkids saying, ‘You were there when?’ 👶💰",
+    "Buy a little now, thank yourself a lot later. 🛒💰",
+    "It’s the gold rush all over again, but this time, it's digital. 💰⛏️",
+    "New era, new rules – this coin plays by its own. 🎮🚀",
+    "The roadmap looks like a blueprint for disrupting the world economy. 📜💡",
+    "If you’ve got diamond hands, this coin is a gift. 💎🎁",
+    "The community spirit here could power a whole city. 🌆💡",
+    "It’s the kind of breakthrough that’ll make traditional finance look ancient. 🏦📈",
+    "The only thing outpacing the tech is the community support. 🫂📈",
+    "You can practically feel the gains compounding as you watch. 📈💰"
 ]
 
 negative_sentences = [
@@ -164,6 +198,28 @@ negative_sentences = [
     "Buying this coin is like trying to catch a falling knife. 🔪📉",
     "The only roadmap here is the one to bankruptcy. 📜💸",
     "If vaporware had a mascot, it’d be this coin. 🌀🤖",
+    "It's a hype train with no brakes and no destination. 🚂💔",
+    "Trying to find value in this coin is like looking for water in the desert. 🏜️💸",
+    "The only thing this project is mining is people’s hopes. ⛏️💤",
+    "Investing in this feels like watching sand slip through your fingers. 🏖️💸",
+    "This coin is about as transparent as a brick wall. 🧱💡",
+    "The only thing it’s disrupting is your wallet. 💸💀",
+    "Promises are big, but delivery is about as reliable as a paper umbrella. ☔❌",
+    "Even the support team seems to be ghosting at this point. 👻🤦",
+    "You'd be better off stashing your cash under your mattress. 🛏️💵",
+    "The only thing high about this coin is the risk. ⚠️📉",
+    "It’s the Titanic of crypto, and it's already hit the iceberg. 🚢🧊",
+    "If you like playing with fire, this coin’s perfect. 🔥💸",
+    "Its whitepaper has more fantasy than a sci-fi novel. 📜👽",
+    "Trusting this coin is like trusting a fox to guard the henhouse. 🦊🐔",
+    "It’s so illiquid, you’d have a better chance cashing out with seashells. 🐚💸",
+    "If it were any shakier, it’d need a warning label. ⚠️📉",
+    "Trying to ‘hodl’ this feels like sitting on a ticking time bomb. ⏳💥",
+    "The roadmap only leads to one place: disappointment. 🗺️💔",
+    "Just remember, even hot air balloons eventually come down. 🎈📉",
+    "It’s like burning cash in a furnace – but less warm. 🔥💸",
+    "Watching this coin drop is like watching a slow-motion train wreck. 🚂💥",
+    "If you've hit rock bottom, this coin is ready to dig deeper. 🪨📉"
 ]
 
 
@@ -360,6 +416,23 @@ class MarketSim:
                     * self.stddev
                 )
             self.step_counter = 1
+
+
+class MarketSimMix:
+    def __init__(self, *sims: "MarketSim"):
+        self.sims: Tuple["MarketSim", ...] = sims
+        self.price = sum(sim.base_value for sim in sims)
+
+    def step(self):
+        net_price = 0
+        out_event = None
+        for sim in self.sims:
+            price, event = sim.step()
+            net_price += price
+            if event is not None:
+                out_event = event  # TODO this is very hacky since it should show the most important event, but should be enough for my specific use of this class
+        self.price = net_price
+        return net_price, out_event
 
 
 if __name__ == "__main__":

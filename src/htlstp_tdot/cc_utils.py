@@ -1,5 +1,3 @@
-from multiprocessing.managers import Value
-
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -7,6 +5,7 @@ ENDIAN = "little"
 PRIVATE_KEY_SIZE = 32
 PUBLIC_KEY_SIZE = 33
 balances = {}
+fake_points = {}
 
 
 class TooPoorException(Exception):
@@ -37,3 +36,17 @@ def send_coins(sender_user_info, receiver_public_key, n):
 
 def get_available_coins(public_key):
     return balances.get(public_key, 0)
+
+
+def get_available_fake_points(public_key):
+    return fake_points.get(public_key, 0)
+
+
+def withdraw_fake_points(public_key, amount: int) -> int:
+    fake_points[public_key] = fake_points.get(public_key, 0) - amount
+    return fake_points[public_key]
+
+
+def deposit_fake_points(public_key, amount: int) -> int:
+    fake_points[public_key] = fake_points.get(public_key, 0) + amount
+    return fake_points[public_key]

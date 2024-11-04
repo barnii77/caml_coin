@@ -1,6 +1,6 @@
 {
   "api_key": "ce4a8484-e95f-4967-84dc-a2a510e0ff20",
-  "points_service": "http://127.0.0.1:8080",
+  "points_service": "https://schnitzeljagd.if.htlstp.ac.at",
   "beff_jezos_user_info": {
     "user_id": "",
     "private_key": "0x834e46bb167a60aaeedcc66ab5c6d30a4e1fcb97fa780a9f43f45b90db0be400",
