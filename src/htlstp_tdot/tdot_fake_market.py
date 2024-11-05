@@ -219,7 +219,8 @@ negative_sentences = [
     "Just remember, even hot air balloons eventually come down. 🎈📉",
     "It’s like burning cash in a furnace – but less warm. 🔥💸",
     "Watching this coin drop is like watching a slow-motion train wreck. 🚂💥",
-    "If you've hit rock bottom, this coin is ready to dig deeper. 🪨📉"
+    "If you've hit rock bottom, this coin is ready to dig deeper. 🪨📉",
+    "The security here is about as strong as JavaScript’s type checking – good luck. 🔓💀",
 ]
 
 

@@ -43,8 +43,6 @@ def run_sim():
             last_step_time += (t - last_step_time) * n_batches / ideal_batches
 
 
-# TODO this function must constantly request a users fake points and if fake_points <= 0, request the real score
-# TODO so it can auto-sell once the user is low on points (low on points = not enough money to afford a single coin?)
 def run_broker():
     while True:
         t = time.time()
@@ -53,8 +51,38 @@ def run_broker():
             open_exchange_rate,
             open_time,
         ) in broker_positions.items():
+            user_info = user_management.get_user_info(user_id)
             if t - open_time >= BROKER_MAX_HOLD_TIME_SECS:
                 user_close_position(user_management.get_user_info(user_id))
+                if user_id not in user_broker_notifications:
+                    user_broker_notifications[user_id] = []
+                user_broker_notifications[user_id].append(
+                    "Broker auto-closed your position because the time limit for open positions has been exceeded"
+                )
+            elif (
+                not user_get_fake_points(
+                    user_info
+                )  # technically redundant, but helps short-circuit networking when possible
+                and user_get_available_points(
+                    user_info
+                )  # user is considered too low on backup capital when he can't afford a single coin
+                < get_coins_to_points_exchange_rate()
+            ):
+                user_close_position(user_management.get_user_info(user_id))
+                if user_id not in user_broker_notifications:
+                    user_broker_notifications[user_id] = []
+                user_broker_notifications[user_id].append(
+                    "Broker auto-closed your position because you dropped too low in backup capital (you must be able to afford at least 1 caml coin to be able to open and hold a position)"
+                )
+            elif (
+                open_exchange_rate >= get_coins_to_points_exchange_rate() * 2
+            ):  # if user made more than 50% loss, auto-sell (eu broker regulation)
+                user_close_position(user_management.get_user_info(user_id))
+                if user_id not in user_broker_notifications:
+                    user_broker_notifications[user_id] = []
+                user_broker_notifications[user_id].append(
+                    "Broker auto-closed your position because you have made a 50% loss and EU broker regulations require closing the position for the user"
+                )
 
 
 def user_close_position(user_info) -> int:
@@ -273,7 +301,8 @@ def api_route_get_scores():
     user_info = user_management.get_user_info(user_id)
     return jsonify(
         coins_available=cc_utils.get_available_coins(user_info.public_key),
-        fake_points=cc_utils.get_available_fake_points(user_info.public_key),
+        fake_points=user_get_fake_points(user_info.public_key),
+        total_points=user_get_available_points(user_info),
     )
 
 
@@ -313,7 +342,7 @@ def api_route_buy():
             jsonify(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
                 n_coins_bought=n_coins_bought,
-                fake_points=cc_utils.get_available_fake_points(user_info.public_key),
+                fake_points=user_get_fake_points(user_info.public_key),
             ),
             200,
         )
@@ -350,7 +379,7 @@ def api_route_sell():
             jsonify_update(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
                 n_coins_sold=amount_coins,
-                fake_points=cc_utils.get_available_fake_points(user_info.public_key),
+                fake_points=user_get_fake_points(user_info.public_key),
             ),
             200,
         )
@@ -398,10 +427,22 @@ def api_route_get_market_steps_since(n: int):
                 400,
             )
         return (
-            jsonify(
-                market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
-                n_retrieved=min(len(sim_data), n),
-                next_market_step=next_market_step,
+            (
+                jsonify(
+                    market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
+                    n_retrieved=min(len(sim_data), n),
+                    next_market_step=next_market_step,
+                )
+                if not current_user.is_authenticated  # TODO test auto-selling to make sure is_authenticated works and the broker auto selling feature works as well
+                or not user_broker_notifications.get(current_user.id)
+                else jsonify(
+                    market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
+                    n_retrieved=min(len(sim_data), n),
+                    next_market_step=next_market_step,
+                    broker_notification=user_broker_notifications[current_user.id].pop(
+                        0
+                    ),
+                )
             ),
             200,
         )
@@ -419,12 +460,18 @@ def api_route_broker_open_position():
     if user_id in broker_positions:
         return jsonify_error("User already has open position"), 400
 
+    user_info = user_management.get_user_info(user_id)
+    if (
+        not user_get_fake_points(user_info)
+        and user_get_available_points(user_info) < get_coins_to_points_exchange_rate()
+    ):
+        return jsonify_error("User has too little base capital to back up his position")
+
     leverage = request.form.get("leverage")
     if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
         return jsonify_error("Invalid leverage"), 400
 
     leverage = int(leverage)
-    user_info = user_management.get_user_info(user_id)
     real_points = user_get_available_points(user_info)
     leverage_is_allowed, min_points_req_for_leverage = (
         requested_leverage_allowed_with_points(real_points, leverage)
@@ -495,9 +542,9 @@ if __name__ == "__main__":
 
     broker_positions = {}
     broker_leverage_min_points_pairs = [(150, 2000), (30, 1000)]
-    BROKER_OPEN_FEE = 0.05  # amount of points it costs to open a position at leverage=1
+    BROKER_OPEN_FEE = 0.2  # amount of points it costs to open a position at leverage=1
     BROKER_KEEP_FEE = (
-        0.2  # amount of points it costs to keep an open position at leverage=1
+        0.15  # amount of points it costs to keep an open position at leverage=1
     )
     BROKER_KEEP_FEE_INTERVAL_SECS = 10  # interval in which BROKER_KEEP_FEE is charged
     BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so users can't forget about their position and loose everything to keep fees)
@@ -540,11 +587,11 @@ if __name__ == "__main__":
                 0.25,
                 0.125,
             ],
-            event_decay_factor=0.99999,
-            event_impact=0.00125,
+            event_decay_factor=0.99999999,
+            event_impact=0.0075,
             event_boost_weight=50,
             event_prob=0.02,
-            event_change_trend_min_stds_from_mean=1.0,
+            event_change_trend_min_stds_from_mean=0.0,
             event_change_trend_weight=0.9,
         ),
         market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
@@ -569,6 +616,7 @@ if __name__ == "__main__":
             event_change_trend_weight=0,
         ),
     )
+    user_broker_notifications = {}
     MAX_PROFIT_POINTS = 500
     sim_data = []
     next_market_step = 0

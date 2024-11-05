@@ -1,4 +1,6 @@
 import sqlite3
+from functools import lru_cache
+
 import cc_utils
 
 DATABASE_PATH = "users.db"
@@ -66,6 +68,7 @@ class CamlCoinUserInfo:
         insert_user(self.user_id, self.private_key, self.public_key)
 
 
+@lru_cache
 def get_user_info(user_id):
     keys = get_user_keys(user_id)
     return CamlCoinUserInfo(user_id, keys["private_key"], keys["public_key"])
