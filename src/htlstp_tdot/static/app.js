@@ -1,6 +1,6 @@
 console.log("app.js loaded successfully");
 
-let testPrices = [];
+let marketPrices = [];
 let candlestickData = [];
 
 let canvas = document.getElementById('cryptoChart');
@@ -8,6 +8,9 @@ let ctx = canvas.getContext('2d');
 let isCandlestick = false;
 let nextMarketStep = -1;
 const windowSize = 500;
+const barWidthScale = 0.0045;
+let candleChartCounter = 5;
+const candleChartBatchSize = 5;
 
 // Function to resize canvas dynamically
 function resizeCanvas() {
@@ -16,6 +19,20 @@ function resizeCanvas() {
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
+
+function showCustomAlert(message, type = 'error') {
+    const alertBox = document.getElementById("customAlert");
+    alertBox.textContent = message;
+
+    // Apply the class for the specific alert type (success, info, or error)
+    alertBox.classList.remove('show', 'success', 'info');
+    alertBox.classList.add('show', type);
+
+    // Hide the alert after 3 seconds (or however long you want)
+    setTimeout(() => {
+        alertBox.classList.remove('show');
+    }, 10000); // Adjust the timeout for how long the alert should be visible
+}
 
 function calculateYScale(data) {
     const minPrice = Math.min(...data.map(d => d.low || d));
@@ -38,15 +55,15 @@ function drawLineChart() {
     resizeCanvas();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const { minPrice, maxPrice } = calculateYScale(testPrices);
+    const { minPrice, maxPrice } = calculateYScale(marketPrices);
     drawYAxis(minPrice, maxPrice);
 
     ctx.beginPath();
     ctx.strokeStyle = "#00ffff";
     ctx.lineWidth = 2;
 
-    testPrices.forEach((price, index) => {
-        let x = (index / (testPrices.length - 1)) * (canvas.width - 30) + 30;
+    marketPrices.forEach((price, index) => {
+        let x = (index / (marketPrices.length - 1)) * (canvas.width - 30) + 30;
         let y = canvas.height - ((price - minPrice) / (maxPrice - minPrice)) * canvas.height;
 
         if (index === 0) ctx.moveTo(x, y);
@@ -63,9 +80,9 @@ function drawCandlestickChart() {
     const { minPrice, maxPrice } = calculateYScale(candlestickData);
     drawYAxis(minPrice, maxPrice);
 
-    let barWidth = (canvas.width - 30) * 0.015;
-    let spacing = (canvas.width - 30) * 0.85 / candlestickData.length;
-    const xOffset = (canvas.width - (spacing * candlestickData.length)) - 20;
+    let barWidth = (canvas.width - 30) * barWidthScale;
+    let spacing = (canvas.width - 30) * (1 - barWidthScale) / candlestickData.length;
+    const xOffset = (canvas.width - (spacing * candlestickData.length)) - 5;
 
     candlestickData.forEach((data, index) => {
         let x = (index * spacing) + xOffset;
@@ -103,7 +120,7 @@ async function fetchData() {
         }
         nextMarketStep = data.next_market_step;
         if (data.hasOwnProperty("broker_notification")) {
-            alert(data.broker_notification)
+            showCustomAlert(data.broker_notification)
         }
         const ticker = document.getElementById("eventTicker");
         for (const el of data.market_steps) {
@@ -113,19 +130,16 @@ async function fetchData() {
                 ticker.textContent = el.event.message;
                 ticker.style.backgroundColor = el.event.sentiment === "positive" ? "#00aa00" : "#aa0000";
             }
-            testPrices.push(newPrice);
+            marketPrices.push(newPrice);
 
-            if (testPrices.length > windowSize) {
-                testPrices.shift();
+            if (marketPrices.length > windowSize) {
+                marketPrices.shift();
             }
-
-            if (candlestickData.length > 100) candlestickData.shift();
-
-            if (isCandlestick) drawCandlestickChart();
-            else drawLineChart();
         }
-        if (data.n_retrieved > 0) {
-            const recent = testPrices.slice(Math.max(testPrices.length - data.n_retrieved - 2, 0));
+        candlestickData = [];
+        candleChartCounter = (candleChartCounter - data.n_retrieved) % candleChartBatchSize;
+        for (let i = candleChartCounter; i < marketPrices.length; i += candleChartBatchSize) {
+            const recent = marketPrices.slice(i, i + candleChartBatchSize + 1);
             candlestickData.push({
                 open: recent[0],
                 high: Math.max(...recent),
@@ -133,6 +147,8 @@ async function fetchData() {
                 close: recent[recent.length - 1]
             });
         }
+        if (isCandlestick) drawCandlestickChart();
+        else drawLineChart();
     } catch (error) {
         console.error("Error fetching exchange rate:", error);
     }
@@ -169,10 +185,10 @@ async function handleBuy() {
         
         const data = await response.json();
         if (response.ok) {
-            alert(`Successfully bought ${data.n_coins_bought} CamlCoins!`);
+            showCustomAlert(`Successfully bought ${data.n_coins_bought} CamlCoins!`);
             updateAvailableCoins(data.coins_available);
         } else {
-            alert(data.error);
+            showCustomAlert(data.error);
         }
     } catch (error) {
         console.error("Error buying coins:", error);
@@ -190,10 +206,10 @@ async function handleSell() {
         
         const data = await response.json();
         if (response.ok) {
-            alert(`Successfully sold ${data.n_coins_sold} CamlCoins!`);
+            showCustomAlert(`Successfully sold ${data.n_coins_sold} CamlCoins!`);
             updateAvailableCoins(data.coins_available); 
         } else {
-            alert(data.error);
+            showCustomAlert(data.error);
         }
     } catch (error) {
         console.error("Error selling coins:", error);
@@ -211,7 +227,7 @@ async function onOpenPosition() {
 
         const data = await response.json();
         if (!response.ok) {
-            alert(data.error);
+            showCustomAlert(data.error);
             return;
         }
     } catch (error) {
@@ -230,8 +246,10 @@ async function onClosePosition() {
         });
 
         const data = await response.json();
-        if (!response.ok) {
-            alert(data.error);
+        if (response.ok) {
+            showCustomAlert("You made a total of " + data.net_earnings + " points with this trade!");
+        } else {
+            showCustomAlert(data.error);
             return;
         }
     } catch (error) {

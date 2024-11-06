@@ -29,6 +29,36 @@ body {
     transition: background-color 0.3s ease;
 }
 
+/* Basic styling for the alert */
+.custom-alert {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: #f44336;  /* Red background for alerts, change for other types */
+    color: white;
+    padding: 10px 20px;
+    border-radius: 5px;
+    font-size: 16px;
+    z-index: 9999;
+    opacity: 0;
+    transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+/* Animation to make the alert pop up */
+.custom-alert.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+/* Optional styles for different alert types */
+.success {
+    background-color: #4CAF50; /* Green background for success */
+}
+.info {
+    background-color: #2196F3; /* Blue background for information */
+}
+
 /* Chart Container */
 .chart-container {
     width: 90%;

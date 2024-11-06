@@ -1,5 +1,7 @@
 import traceback
 import secrets
+from functools import lru_cache
+
 import requests
 import threading
 import math
@@ -101,6 +103,14 @@ def run_background_services():
                 user_broker_notifications[user_id].append(
                     "Broker auto-closed your position because you have made a 50% loss and EU broker regulations require closing the position for the user"
                 )
+
+
+@lru_cache
+def get_readable_name_of_user(user_id):
+    return requests.get(
+        f"{config['points_service']}/api/public/user/name/{user_id}",
+        headers=api_headers,
+    ).json().get("value")
 
 
 def restart_on_crash(func):
@@ -396,7 +406,7 @@ def api_route_buy():
             (
                 n_coins_bought * USER_ACTION_EVENT_SCALE,
                 "positive",
-                f"user {user_id} bought {n_coins_bought} CC",
+                f"user {get_readable_name_of_user(user_id)} bought {n_coins_bought} CC",
             )
         )
         return (
@@ -440,7 +450,7 @@ def api_route_sell():
             (
                 amount_coins * USER_ACTION_EVENT_SCALE,
                 "negative",
-                f"user {user_id} sold {amount_coins} CC",
+                f"user {get_readable_name_of_user(user_id)} sold {amount_coins} CC",
             )
         )
         return (
@@ -498,14 +508,14 @@ def api_route_get_market_steps_since(n: int):
             (
                 jsonify(
                     market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
-                    n_retrieved=min(len(sim_data), n),
+                    n_retrieved=next_market_step - n,
                     next_market_step=next_market_step,
                 )
                 if not current_user.is_authenticated  # TODO test auto-selling to make sure is_authenticated works and the broker auto selling feature works as well
                 or not user_broker_notifications.get(current_user.id)
                 else jsonify(
                     market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
-                    n_retrieved=min(len(sim_data), n),
+                    n_retrieved=next_market_step - n,
                     next_market_step=next_market_step,
                     broker_notification=user_broker_notifications[current_user.id].pop(
                         0
@@ -558,7 +568,7 @@ def api_route_broker_open_position():
         (
             leverage * USER_ACTION_EVENT_SCALE,
             "positive",
-            f"CamlCoin Broker AG bought {leverage} CC",
+            f"CamlCoin Broker AG bought {leverage} CC for user {get_readable_name_of_user(user_id)}",
         )
     )
     return (
@@ -585,7 +595,7 @@ def api_route_broker_close_position():
         (
             leverage * USER_ACTION_EVENT_SCALE,
             "negative",
-            f"CamlCoin Broker AG sold {leverage} CC",
+            f"CamlCoin Broker AG sold {leverage} CC for user {get_readable_name_of_user(user_id)}",
         )
     )
     return (
@@ -639,27 +649,27 @@ if __name__ == "__main__":
     STATE_TIMEOUT = 15
 
     user_buy_sell_event_queue = []
-    USER_ACTION_EVENT_SCALE = 0.01
+    USER_ACTION_EVENT_SCALE = 0.005
 
     broker_positions = {}
-    broker_leverage_min_points_pairs = [(150, 2000), (30, 1000)]
-    BROKER_OPEN_FEE = 0.2  # amount of points it costs to open a position at leverage=1
+    broker_leverage_min_points_pairs = [(500, 20000), (300, 5000), (150, 2000), (30, 1000)]
+    BROKER_OPEN_FEE = 0.1  # amount of points it costs to open a position at leverage=1
     BROKER_KEEP_FEE = (
-        0.15  # amount of points it costs to keep an open position at leverage=1
+        0.075  # amount of points it costs to keep an open position at leverage=1
     )
     BROKER_KEEP_FEE_INTERVAL_SECS = 10  # interval in which BROKER_KEEP_FEE is charged
     BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so users can't forget about their position and loose everything to keep fees)
 
-    SIM_BATCHES_PER_SECOND = 3  # num sim batches per second
+    SIM_BATCHES_PER_SECOND = 2  # num sim batches per second
     SIM_BATCH_SIZE = (
         3  # how many steps are computed in one go to avoid locking too often
     )
-    seed = 44
+    seed = 43
     sim = market.MarketSimMix(
         (
             market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
                 base_value=100.0,
-                bounce_back_value=20.0,
+                bounce_back_value=40.0,
                 market_boost_increase_factor=1.0,
                 seed=seed,
                 stddev=0.005,
@@ -693,7 +703,7 @@ if __name__ == "__main__":
                 event_impact=0.0075,
                 event_boost_weight=50,
                 event_prob=0.02,
-                event_change_trend_min_stds_from_mean=0.3,
+                event_change_trend_min_stds_from_mean=0.4,
                 event_change_trend_weight=1.0,
             ),
             market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
@@ -746,6 +756,7 @@ if __name__ == "__main__":
     user_management.create_users_table()
     sim_thread = threading.Thread(target=restart_on_crash(run_sim))
     bg_service_thread = threading.Thread(target=restart_on_crash(run_background_services))
+
     sim_thread.start()
     bg_service_thread.start()
     app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False, threaded=True)
