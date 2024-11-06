@@ -6,7 +6,7 @@ import json
 import time
 
 from typing import Union, Optional
-from flask import Flask, url_for, redirect, request, render_template, jsonify
+from flask import Flask, url_for, redirect, request, render_template, jsonify, send_from_directory
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -16,7 +16,7 @@ from flask_login import (
     login_required,
 )
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="__this_folder_does_not_exist__")
 
 app.secret_key = secrets.token_urlsafe(24)
 login_manager = LoginManager()
@@ -46,11 +46,12 @@ def run_sim():
 def run_broker():
     while True:
         t = time.time()
+        kv = list(broker_positions.items())
         for user_id, (
             leverage,
             open_exchange_rate,
             open_time,
-        ) in broker_positions.items():
+        ) in kv:
             user_info = user_management.get_user_info(user_id)
             if t - open_time >= BROKER_MAX_HOLD_TIME_SECS:
                 user_close_position(user_management.get_user_info(user_id))
@@ -83,6 +84,23 @@ def run_broker():
                 user_broker_notifications[user_id].append(
                     "Broker auto-closed your position because you have made a 50% loss and EU broker regulations require closing the position for the user"
                 )
+
+
+def restart_on_crash(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                pass
+
+    return wrapper
+
+
+def get_form_data():
+    if not request.form:
+        return request.json
+    return request.form
 
 
 def user_close_position(user_info) -> int:
@@ -231,6 +249,20 @@ def load_user(user_id):
     return users.setdefault(user_id, user)
 
 
+@app.route("/static/<filename>")
+def hacky_request_file_from_static(filename: str):
+    if filename.endswith('.css'):
+        return send_from_directory('static', filename, mimetype='text/css')
+    elif filename.endswith('.js'):
+        return send_from_directory('static', filename, mimetype='application/javascript')
+    elif filename.endswith('.json'):
+        return send_from_directory('static', filename, mimetype='text/json')
+    elif filename.endswith('.html'):
+        return send_from_directory('static', filename, mimetype='text/html')
+    else:
+        return "Invalid file type to fetch", 400
+
+
 @app.route("/login")
 def login():
     state = secrets.token_urlsafe(16)
@@ -245,16 +277,17 @@ def login():
         redirect_url = response.json().get("value")
         if not redirect_url:
             return "Error in authentication process: Your user id is invalid", 400
-        return redirect(redirect_url), 200
+        return redirect(redirect_url)
     return "Error in authentication process", 500
 
 
 @app.route("/manual-login", methods=["GET", "POST"])
 def manual_login():
     if request.method == "GET":
-        return render_template("manual_login.html"), 200
-    user_id = request.form.get("userId")
-    login_token = request.form.get("token")
+        return render_template("manual_login.html", url_for=url_for), 200
+    form = get_form_data()
+    user_id = form.get("userId")
+    login_token = form.get("token")
     if user_id and is_valid_user_id(user_id) or login_token:
         if login_token:
             user_id = get_user_id_from_login_token(login_token)
@@ -264,7 +297,7 @@ def manual_login():
         user.id = user_id
         users[user_id] = user
         login_user(user)
-        return redirect(url_for("index")), 200
+        return redirect(url_for("index"))
 
     return "Invalid user id", 400
 
@@ -274,12 +307,12 @@ def manual_login():
 def logout():
     users.pop(current_user.id)
     logout_user()
-    return redirect(url_for("logged_out")), 200
+    return redirect(url_for("logged_out"))
 
 
 @app.route("/logged-out")
 def logged_out():
-    return render_template("logged_out.html"), 200
+    return render_template("logged_out.html", url_for=url_for), 200
 
 
 @app.route("/oauth/callback")
@@ -290,7 +323,7 @@ def oauth_callback():
         user.id = user_id
         users[user_id] = user
         login_user(user)
-        return redirect(url_for("index")), 200
+        return redirect(url_for("index"))
     return "Error in OAuth callback", 400
 
 
@@ -310,7 +343,7 @@ def api_route_get_scores():
 @login_required
 def api_route_buy():
     user_id = current_user.id
-    n_coins_bought = request.form.get("amount_coins_bought")
+    n_coins_bought = get_form_data().get("amount_coins_bought")
     if (
         n_coins_bought is None
         or not n_coins_bought.isdigit()
@@ -338,6 +371,7 @@ def api_route_buy():
         withdraw_points(
             user_info, math.ceil(n_coins_bought * get_coins_to_points_exchange_rate())
         )
+        user_buy_sell_event_queue.append((n_coins_bought * USER_ACTION_EVENT_SCALE, "positive", f"user {user_id} bought {n_coins_bought} CC"))
         return (
             jsonify(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
@@ -353,7 +387,7 @@ def api_route_buy():
 @login_required
 def api_route_sell():
     user_id = current_user.id
-    amount_coins = request.form.get("amount_coins_sold")
+    amount_coins = get_form_data().get("amount_coins_sold")
     if amount_coins is None or not amount_coins.isdigit() or int(amount_coins) <= 0:
         return jsonify_error("Invalid amount"), 400
     amount_coins = int(amount_coins)
@@ -375,6 +409,7 @@ def api_route_sell():
                 400,
             )
         deposit_points(user_info, n_points_to_recv)
+        user_buy_sell_event_queue.append((amount_coins * USER_ACTION_EVENT_SCALE, "negative", f"user {user_id} sold {amount_coins} CC"))
         return (
             jsonify_update(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
@@ -467,7 +502,7 @@ def api_route_broker_open_position():
     ):
         return jsonify_error("User has too little base capital to back up his position")
 
-    leverage = request.form.get("leverage")
+    leverage = get_form_data().get("leverage")
     if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
         return jsonify_error("Invalid leverage"), 400
 
@@ -486,6 +521,7 @@ def api_route_broker_open_position():
         get_coins_to_points_exchange_rate(),
         time.time(),
     )
+    user_buy_sell_event_queue.append((leverage * USER_ACTION_EVENT_SCALE, "positive", f"CamlCoin Broker AG bought {leverage} CC"))
     return (
         jsonify(
             open_fee=BROKER_OPEN_FEE,
@@ -504,7 +540,9 @@ def api_route_broker_close_position():
         return jsonify_error("User does not have an open position"), 400
 
     user_info = user_management.get_user_info(user_id)
+    leverage, *_ = broker_positions[user_info]
     net_earnings = user_close_position(user_info)
+    user_buy_sell_event_queue.append((leverage * USER_ACTION_EVENT_SCALE, "negative", f"CamlCoin Broker AG sold {leverage} CC"))
     return (
         jsonify(net_earnings=net_earnings),
         200,
@@ -529,7 +567,9 @@ def index():
     info = user_management.get_user_info(user_id)
     return (
         render_template(
-            "index.html", coins_available=cc_utils.get_available_coins(info.public_key)
+            "index.html",
+            coins_available=cc_utils.get_available_coins(info.public_key),
+            url_for=url_for,
         ),
         200,
     )
@@ -539,6 +579,9 @@ if __name__ == "__main__":
     import tdot_fake_market as market
     import cc_utils
     import user_management
+
+    user_buy_sell_event_queue = []
+    USER_ACTION_EVENT_SCALE = 0.01
 
     broker_positions = {}
     broker_leverage_min_points_pairs = [(150, 2000), (30, 1000)]
@@ -554,7 +597,7 @@ if __name__ == "__main__":
         3  # how many steps are computed in one go to avoid locking too often
     )
     seed = 44
-    sim = market.MarketSimMix(
+    sim = market.MarketSimMix((
         market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
             base_value=100.0,
             bounce_back_value=20.0,
@@ -615,7 +658,7 @@ if __name__ == "__main__":
             event_change_trend_min_stds_from_mean=0,
             event_change_trend_weight=0,
         ),
-    )
+    ), (user_buy_sell_event_queue, None))
     user_broker_notifications = {}
     MAX_PROFIT_POINTS = 500
     sim_data = []
@@ -640,8 +683,8 @@ if __name__ == "__main__":
     cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
     api_headers = {"Authorization": f"Bearer {config['api_key']}"}
     user_management.create_users_table()
-    sim_thread = threading.Thread(target=run_sim)
-    broker_thread = threading.Thread(target=run_broker)
+    sim_thread = threading.Thread(target=restart_on_crash(run_sim))
+    broker_thread = threading.Thread(target=restart_on_crash(run_broker))
     sim_thread.start()
     broker_thread.start()
-    app.run(host="127.0.0.1", debug=True, use_reloader=False)
+    app.run(host="localhost", debug=True, use_reloader=False, threaded=True)

@@ -248,10 +248,12 @@ def generate_cryptocurrency_opinion():
     platform = generate_platform()
     sentiment = random.choice(["positive", "negative"])
     sentences = generate_sentences(sentiment)
-    return sentiment, f"{name} posted on {platform}: " + " ".join(sentences)
+    return 1, sentiment, f"{name} posted on {platform}: " + " ".join(sentences)
 
 
-def get_market_event():
+def get_market_event(eiq):
+    if eiq:
+        return eiq.pop(0)
     event_generators = [generate_cryptocurrency_opinion]
     return random.choice(event_generators)()
 
@@ -351,7 +353,7 @@ class MarketSim:
 
         return total_noise
 
-    def step(self):
+    def step(self, eiq):
         # Continue generating noise until the price is above bounce-back value
         while True:
             noise = self._get_fractal_noise()
@@ -369,8 +371,8 @@ class MarketSim:
 
         # Handle events
         if random.random() < self.event_prob:
-            sentiment, message = get_market_event()
-            self._handle_event(sentiment)
+            mag, sentiment, message = get_market_event(eiq)
+            self._handle_event(mag, sentiment)
         else:
             sentiment, message = None, None
 
@@ -393,11 +395,11 @@ class MarketSim:
             self.market_boost = 1
         self.step_counter = 0
 
-    def _handle_event(self, sentiment):
+    def _handle_event(self, mag, sentiment):
         # Generate a random boost/damp value for events
         sentiment_sign = 1 if sentiment == "positive" else -1
         event_impact = abs(random.gauss(0, 1))
-        self.event_boost += event_impact * self.event_impact * sentiment_sign
+        self.event_boost += event_impact * self.event_impact * sentiment_sign * mag
 
         # note that std of event_impact distribution is 1
         if event_impact > self.event_change_trend_min_stds_from_mean:
@@ -420,15 +422,17 @@ class MarketSim:
 
 
 class MarketSimMix:
-    def __init__(self, *sims: "MarketSim"):
+    def __init__(self, sims: tuple["MarketSim", ...], event_inject_queues: tuple[Optional[list], ...]):
+        assert len(sims) == len(event_inject_queues)
         self.sims: Tuple["MarketSim", ...] = sims
+        self.event_inject_queues = event_inject_queues
         self.price = sum(sim.base_value for sim in sims)
 
     def step(self):
         net_price = 0
         out_event = None
-        for sim in self.sims:
-            price, event = sim.step()
+        for sim, eiq in zip(self.sims, self.event_inject_queues):
+            price, event = sim.step(eiq)
             net_price += price
             if event is not None:
                 out_event = event  # TODO this is very hacky since it should show the most important event, but should be enough for my specific use of this class
