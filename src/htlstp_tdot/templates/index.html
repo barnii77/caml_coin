@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <h1 id="coinsAvailable" style="top: 0; left: 0;">You have 0 CC</h1>
     <!-- Event Ticker at the Top -->
     <div id="eventTicker" class="event-ticker">Market is stable...</div>
 
@@ -17,16 +18,32 @@
 
     <!-- Buy/Sell Controls -->
     <div class="trade-controls">
-        <label for="amount">Amount:</label>
-        <div class="amount-control">
-            <button id="decreaseButton">-</button>
-            <input type="number" id="amount" value="1" min="1">
-            <button id="increaseButton">+</button>
+        <div id="removeOnOpenPosition">
+            <div class="amount-container">
+                <label for="amount"><b>Amount:</b></label>
+                <div class="amount-control">
+                    <button id="decreaseButton">-</button>
+                    <input type="number" id="amount" value="1" min="1">
+                    <button id="increaseButton">+</button>
+                </div>
+            </div>
+
+            <!-- Grouping Buy and Sell buttons -->
+            <div class="button-row">
+                <button id="buyButton">Buy CamlCoin</button>
+                <button id="sellButton">Sell CamlCoin</button>
+            </div>
+
+            <!-- Grouping Open and Close Position buttons -->
+            <div class="button-row">
+                <button id="openPosition">Open Position at CamlCoin Broker AG</button>
+            </div>
         </div>
-        <button id="buyButton">Buy CamlCoin</button>
-        <button id="sellButton">Sell CamlCoin</button>
+        <button id="closePosition">Close Position</button>
     </div>
-    <div class="controls">
+
+    <!-- Chart Controls -->
+    <div class="controls button-row">
         <button id="lineChartButton">Line Chart</button>
         <button id="candlestickChartButton">Candlestick Chart</button>
     </div>

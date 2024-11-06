@@ -7,6 +7,7 @@ let canvas = document.getElementById('cryptoChart');
 let ctx = canvas.getContext('2d');
 let isCandlestick = false;
 let nextMarketStep = -1;
+const windowSize = 500;
 
 // Function to resize canvas dynamically
 function resizeCanvas() {
@@ -88,7 +89,7 @@ async function fetchData() {
     if (nextMarketStep === -1) {
         try {
             const response = await fetch("/api/market/next-market-step");
-            nextMarketStep = (await response.json()).next_market_step;
+            nextMarketStep = Math.max((await response.json()).next_market_step - windowSize, 0);
         } catch (e) {
             nextMarketStep = -1;
             return;
@@ -114,21 +115,23 @@ async function fetchData() {
             }
             testPrices.push(newPrice);
 
-            if (testPrices.length > 500) {
+            if (testPrices.length > windowSize) {
                 testPrices.shift();
             }
-
-            candlestickData.push({
-                open: testPrices[testPrices.length - 2] || newPrice,
-                high: newPrice,
-                low: newPrice,
-                close: newPrice
-            });
 
             if (candlestickData.length > 100) candlestickData.shift();
 
             if (isCandlestick) drawCandlestickChart();
             else drawLineChart();
+        }
+        if (data.n_retrieved > 0) {
+            const recent = testPrices.slice(Math.max(testPrices.length - data.n_retrieved - 2, 0));
+            candlestickData.push({
+                open: recent[0],
+                high: Math.max(...recent),
+                low: Math.min(...recent),
+                close: recent[recent.length - 1]
+            });
         }
     } catch (error) {
         console.error("Error fetching exchange rate:", error);
@@ -150,6 +153,10 @@ document.getElementById('candlestickChartButton').addEventListener('click', () =
     drawCandlestickChart();
 });
 
+function updateAvailableCoins(coins) {
+    document.getElementById('coinsAvailable').textContent = "You have " + coins.toString() + " CC";
+}
+
 // Handle Buy and Sell actions
 async function handleBuy() {
     const amount = document.getElementById("amount").value;
@@ -163,7 +170,7 @@ async function handleBuy() {
         const data = await response.json();
         if (response.ok) {
             alert(`Successfully bought ${data.n_coins_bought} CamlCoins!`);
-            updateAvailableCoins(data.coins_available); 
+            updateAvailableCoins(data.coins_available);
         } else {
             alert(data.error);
         }
@@ -193,9 +200,53 @@ async function handleSell() {
     }
 }
 
+async function onOpenPosition() {
+    const amount = document.getElementById("amount").value;
+    try {
+        const response = await fetch("/api/broker/open-position", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ leverage: amount }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            alert(data.error);
+            return;
+        }
+    } catch (error) {
+        console.error("Error buying coins:", error);
+        return;
+    }
+    document.getElementById("removeOnOpenPosition").style.display = "none";
+}
+
+async function onClosePosition() {
+    try {
+        const response = await fetch("/api/broker/close-position", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            alert(data.error);
+            return;
+        }
+    } catch (error) {
+        console.error("Error buying coins:", error);
+        return;
+    }
+    document.getElementById("removeOnOpenPosition").style.display = "";
+}
+
 // Buy and Sell button event listeners
 document.getElementById('buyButton').addEventListener('click', handleBuy);
 document.getElementById('sellButton').addEventListener('click', handleSell);
+
+document.getElementById('openPosition').addEventListener('click', onOpenPosition);
+document.getElementById('closePosition').addEventListener('click', onClosePosition);
 
 // Use stepUp and stepDown for increment/decrement
 const amountField = document.getElementById('amount');

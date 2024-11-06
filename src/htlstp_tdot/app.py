@@ -1,3 +1,4 @@
+import traceback
 import secrets
 import requests
 import threading
@@ -6,7 +7,15 @@ import json
 import time
 
 from typing import Union, Optional
-from flask import Flask, url_for, redirect, request, render_template, jsonify, send_from_directory
+from flask import (
+    Flask,
+    url_for,
+    redirect,
+    request,
+    render_template,
+    jsonify,
+    send_from_directory,
+)
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -43,8 +52,16 @@ def run_sim():
             last_step_time += (t - last_step_time) * n_batches / ideal_batches
 
 
-def run_broker():
+def run_background_services():
     while True:
+        # state cleaning
+        t = time.time()
+        kv = list(states.items())
+        for state, ts in kv:
+            if ts - t > STATE_TIMEOUT:
+                states.pop(state)
+
+        # broker auto-functions like selling if the user will run out of money soon or applying open position timeouts
         t = time.time()
         kv = list(broker_positions.items())
         for user_id, (
@@ -62,7 +79,7 @@ def run_broker():
                 )
             elif (
                 not user_get_fake_points(
-                    user_info
+                    user_info.public_key
                 )  # technically redundant, but helps short-circuit networking when possible
                 and user_get_available_points(
                     user_info
@@ -92,7 +109,7 @@ def restart_on_crash(func):
             try:
                 func(*args, **kwargs)
             except Exception:
-                pass
+                traceback.format_exc()
 
     return wrapper
 
@@ -126,9 +143,9 @@ def user_close_position(user_info) -> int:
     return net_earnings
 
 
-def user_get_fake_points(user_info) -> int:
+def user_get_fake_points(public_key) -> int:
     return (
-        max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(user_info.public_key))
+        max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(public_key))
         - MAX_PROFIT_POINTS
     )
 
@@ -251,14 +268,16 @@ def load_user(user_id):
 
 @app.route("/static/<filename>")
 def hacky_request_file_from_static(filename: str):
-    if filename.endswith('.css'):
-        return send_from_directory('static', filename, mimetype='text/css')
-    elif filename.endswith('.js'):
-        return send_from_directory('static', filename, mimetype='application/javascript')
-    elif filename.endswith('.json'):
-        return send_from_directory('static', filename, mimetype='text/json')
-    elif filename.endswith('.html'):
-        return send_from_directory('static', filename, mimetype='text/html')
+    if filename.endswith(".css"):
+        return send_from_directory("static", filename, mimetype="text/css")
+    elif filename.endswith(".js"):
+        return send_from_directory(
+            "static", filename, mimetype="application/javascript"
+        )
+    elif filename.endswith(".json"):
+        return send_from_directory("static", filename, mimetype="application/json")
+    elif filename.endswith(".html"):
+        return send_from_directory("static", filename, mimetype="text/html")
     else:
         return "Invalid file type to fetch", 400
 
@@ -266,6 +285,7 @@ def hacky_request_file_from_static(filename: str):
 @app.route("/login")
 def login():
     state = secrets.token_urlsafe(16)
+    states[state] = time.time()
     redirect_uri = url_for("oauth_callback", _external=True)
     points_service_url = f"{config['points_service']}/api/auth/createRedirectUri"
     response = requests.get(
@@ -286,20 +306,18 @@ def manual_login():
     if request.method == "GET":
         return render_template("manual_login.html", url_for=url_for), 200
     form = get_form_data()
-    user_id = form.get("userId")
     login_token = form.get("token")
-    if user_id and is_valid_user_id(user_id) or login_token:
-        if login_token:
-            user_id = get_user_id_from_login_token(login_token)
-            if not user_id:
-                return "Invalid token", 400
+    if login_token:
+        user_id = get_user_id_from_login_token(login_token)
+        if not user_id:
+            return "Invalid token", 400
         user = User()
         user.id = user_id
         users[user_id] = user
         login_user(user)
         return redirect(url_for("index"))
 
-    return "Invalid user id", 400
+    return "Missing login token", 400
 
 
 @app.route("/logout")
@@ -318,13 +336,16 @@ def logged_out():
 @app.route("/oauth/callback")
 def oauth_callback():
     user_id = request.args.get("userId")
+    state = request.args.get("state")
+    if state not in states:
+        return "Invalid login state: Please retry by going back to the login or starting page!", 401
     if user_id:
         user = User()
         user.id = user_id
         users[user_id] = user
         login_user(user)
         return redirect(url_for("index"))
-    return "Error in OAuth callback", 400
+    return "Error in OAuth callback", 401
 
 
 @app.route("/api/get-scores")
@@ -371,7 +392,13 @@ def api_route_buy():
         withdraw_points(
             user_info, math.ceil(n_coins_bought * get_coins_to_points_exchange_rate())
         )
-        user_buy_sell_event_queue.append((n_coins_bought * USER_ACTION_EVENT_SCALE, "positive", f"user {user_id} bought {n_coins_bought} CC"))
+        user_buy_sell_event_queue.append(
+            (
+                n_coins_bought * USER_ACTION_EVENT_SCALE,
+                "positive",
+                f"user {user_id} bought {n_coins_bought} CC",
+            )
+        )
         return (
             jsonify(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
@@ -409,7 +436,13 @@ def api_route_sell():
                 400,
             )
         deposit_points(user_info, n_points_to_recv)
-        user_buy_sell_event_queue.append((amount_coins * USER_ACTION_EVENT_SCALE, "negative", f"user {user_id} sold {amount_coins} CC"))
+        user_buy_sell_event_queue.append(
+            (
+                amount_coins * USER_ACTION_EVENT_SCALE,
+                "negative",
+                f"user {user_id} sold {amount_coins} CC",
+            )
+        )
         return (
             jsonify_update(
                 coins_available=cc_utils.get_available_coins(user_info.public_key),
@@ -497,10 +530,10 @@ def api_route_broker_open_position():
 
     user_info = user_management.get_user_info(user_id)
     if (
-        not user_get_fake_points(user_info)
+        not user_get_fake_points(user_info.public_key)
         and user_get_available_points(user_info) < get_coins_to_points_exchange_rate()
     ):
-        return jsonify_error("User has too little base capital to back up his position")
+        return jsonify_error("User has too little base capital to back up his position"), 400
 
     leverage = get_form_data().get("leverage")
     if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
@@ -514,14 +547,20 @@ def api_route_broker_open_position():
     if not leverage_is_allowed:
         return jsonify_error(
             f"For this amount of leverage, you need at least {min_points_req_for_leverage}"
-        )
+        ), 400
 
     broker_positions[user_id] = (
         leverage,
         get_coins_to_points_exchange_rate(),
         time.time(),
     )
-    user_buy_sell_event_queue.append((leverage * USER_ACTION_EVENT_SCALE, "positive", f"CamlCoin Broker AG bought {leverage} CC"))
+    user_buy_sell_event_queue.append(
+        (
+            leverage * USER_ACTION_EVENT_SCALE,
+            "positive",
+            f"CamlCoin Broker AG bought {leverage} CC",
+        )
+    )
     return (
         jsonify(
             open_fee=BROKER_OPEN_FEE,
@@ -540,11 +579,17 @@ def api_route_broker_close_position():
         return jsonify_error("User does not have an open position"), 400
 
     user_info = user_management.get_user_info(user_id)
-    leverage, *_ = broker_positions[user_info]
+    leverage, *_ = broker_positions[user_id]
     net_earnings = user_close_position(user_info)
-    user_buy_sell_event_queue.append((leverage * USER_ACTION_EVENT_SCALE, "negative", f"CamlCoin Broker AG sold {leverage} CC"))
+    user_buy_sell_event_queue.append(
+        (
+            leverage * USER_ACTION_EVENT_SCALE,
+            "negative",
+            f"CamlCoin Broker AG sold {leverage} CC",
+        )
+    )
     return (
-        jsonify(net_earnings=net_earnings),
+        jsonify(net_earnings=net_earnings, coins_available=cc_utils.get_available_coins(user_info)),
         200,
     )
 
@@ -557,7 +602,17 @@ def api_route_broker_get_position():
         lev, open_xcr, open_time = broker_positions[user_id]
         return jsonify(leverage=lev, open_exchange_rate=open_xcr, open_time=open_time)
     else:
-        return jsonify_error("no open position")
+        return jsonify_error("no open position"), 400
+
+
+@app.route("/api/broker/get-params")
+def api_route_get_broker_params():
+    return jsonify(
+        open_fee=BROKER_OPEN_FEE,
+        keep_fee=BROKER_KEEP_FEE,
+        keep_fee_interval=BROKER_KEEP_FEE_INTERVAL_SECS,
+        max_hold_time=BROKER_MAX_HOLD_TIME_SECS,
+    )
 
 
 @app.route("/")
@@ -580,6 +635,9 @@ if __name__ == "__main__":
     import cc_utils
     import user_management
 
+    states = {}
+    STATE_TIMEOUT = 15
+
     user_buy_sell_event_queue = []
     USER_ACTION_EVENT_SCALE = 0.01
 
@@ -597,68 +655,71 @@ if __name__ == "__main__":
         3  # how many steps are computed in one go to avoid locking too often
     )
     seed = 44
-    sim = market.MarketSimMix((
-        market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
-            base_value=100.0,
-            bounce_back_value=20.0,
-            market_boost_increase_factor=1.0,
-            seed=seed,
-            stddev=0.005,
-            freqs=[
-                1,
-                2,
-                4,
-                8,
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-                1024,
-            ],
-            extra_freq_weights=[
-                8,
-                8,
-                8,
-                4,
-                4,
-                4,
-                2,
-                1.5,
-                0.6,
-                0.25,
-                0.125,
-            ],
-            event_decay_factor=0.99999999,
-            event_impact=0.0075,
-            event_boost_weight=50,
-            event_prob=0.02,
-            event_change_trend_min_stds_from_mean=0.0,
-            event_change_trend_weight=0.9,
+    sim = market.MarketSimMix(
+        (
+            market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
+                base_value=100.0,
+                bounce_back_value=20.0,
+                market_boost_increase_factor=1.0,
+                seed=seed,
+                stddev=0.005,
+                freqs=[
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                ],
+                extra_freq_weights=[
+                    8,
+                    8,
+                    8,
+                    4,
+                    4,
+                    4,
+                    2,
+                    1.5,
+                    0.6,
+                    0.25,
+                    0.125,
+                ],
+                event_decay_factor=0.99999999,
+                event_impact=0.0075,
+                event_boost_weight=50,
+                event_prob=0.02,
+                event_change_trend_min_stds_from_mean=0.3,
+                event_change_trend_weight=1.0,
+            ),
+            market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
+                base_value=0,
+                bounce_back_value=-9999999999999999,
+                market_boost_increase_factor=1.0,
+                seed=seed,
+                stddev=0.06,
+                freqs=[
+                    20 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
+                    60 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
+                ],
+                extra_freq_weights=[
+                    96 / (20 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
+                    256 / (60 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
+                ],
+                event_decay_factor=0,
+                event_impact=0,
+                event_boost_weight=0,
+                event_prob=0,
+                event_change_trend_min_stds_from_mean=0,
+                event_change_trend_weight=0,
+            ),
         ),
-        market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
-            base_value=0,
-            bounce_back_value=-9999999999999999,
-            market_boost_increase_factor=1.0,
-            seed=seed,
-            stddev=0.06,
-            freqs=[
-                20 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
-                60 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
-            ],
-            extra_freq_weights=[
-                96 / (20 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
-                256 / (60 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
-            ],
-            event_decay_factor=0,
-            event_impact=0,
-            event_boost_weight=0,
-            event_prob=0,
-            event_change_trend_min_stds_from_mean=0,
-            event_change_trend_weight=0,
-        ),
-    ), (user_buy_sell_event_queue, None))
+        (user_buy_sell_event_queue, None),
+    )
     user_broker_notifications = {}
     MAX_PROFIT_POINTS = 500
     sim_data = []
@@ -684,7 +745,7 @@ if __name__ == "__main__":
     api_headers = {"Authorization": f"Bearer {config['api_key']}"}
     user_management.create_users_table()
     sim_thread = threading.Thread(target=restart_on_crash(run_sim))
-    broker_thread = threading.Thread(target=restart_on_crash(run_broker))
+    bg_service_thread = threading.Thread(target=restart_on_crash(run_background_services))
     sim_thread.start()
-    broker_thread.start()
-    app.run(host="localhost", debug=True, use_reloader=False, threaded=True)
+    bg_service_thread.start()
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False, threaded=True)
