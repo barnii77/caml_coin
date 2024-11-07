@@ -9,13 +9,14 @@
 </head>
 <body>
     <span class="menu-icon" onclick="openMenu()">&#9776; Menu</span>
-    <h1 id="coinsAvailable">You have 0 CC</h1>
+    <h2 id="coinsAvailable">You have 0 CC</h2>
     <div id="eventTicker" class="event-ticker">Market is stable...</div>
 
     <div id="menu">
         <a href="javascript:void(0)" class="closebtn" onclick="closeMenu()">&times;</a>
         <a id="changeTradeType" href="javascript:void(0)" onclick="toggleTradeType()">Change Trading Type</a>
         <a id="changeChartType" href="javascript:void(0)" onclick="toggleChartType()">Change Chart Type</a>
+        <a href="/leaderboard">View Leaderboard</a>
     </div>
 
     <div id="main">
@@ -44,9 +45,9 @@
             <div class="amount-container">
                 <label for="amount"><b>Amount:</b></label>
                 <div class="amount-control">
-                    <button id="decreaseButton">-</button>
+                    <button id="decreaseButton" onclick="addToAmount(-1)">-</button>
                     <input type="number" id="amount" value="1" min="1">
-                    <button id="increaseButton">+</button>
+                    <button id="increaseButton" onclick="addToAmount(1)">+</button>
                 </div>
             </div>
         </div>

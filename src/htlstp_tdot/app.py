@@ -1,12 +1,13 @@
 import traceback
 import secrets
-from functools import lru_cache
 
 import requests
 import threading
 import math
 import json
 import time
+import hashlib
+import functools
 
 from typing import Union, Optional
 from flask import (
@@ -108,16 +109,18 @@ def run_background_services():
                 )
 
 
-@lru_cache
 def get_readable_name_of_user(user_id):
-    return (
-        requests.get(
-            f"{config['points_service']}/api/public/user/name/{user_id}",
-            headers=api_headers,
+    if user_id not in user_id_to_readable_name:
+        name = (
+            requests.get(
+                f"{config['points_service']}/api/public/user/name/{user_id}",
+                headers=api_headers,
+            )
+            .json()
+            .get("value")
         )
-        .json()
-        .get("value")
-    )
+        user_id_to_readable_name[user_id] = name
+    return user_id_to_readable_name[user_id]
 
 
 def restart_on_crash(func):
@@ -135,6 +138,12 @@ def get_form_data():
     if not request.form:
         return request.json
     return request.form
+
+
+def get_args_data():
+    if not request.args:
+        return request.json
+    return request.args
 
 
 def user_close_position(user_info) -> int:
@@ -270,6 +279,32 @@ def is_valid_user_id(user_id) -> bool:
         return "points" in j
 
 
+def admin_route(method="POST"):
+    method = method.lower()
+    if method not in ("get", "post"):
+        raise ValueError("unsupported method for admin route: " + method)
+
+    def admin_route_inner(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            global n_valid_admin_requests
+            params = get_form_data() if method == "post" else get_args_data()
+            if (
+                params.get("auth_key")
+                == hashlib.sha512(
+                    (str(n_valid_admin_requests) + config["api_key"]).encode()
+                ).hexdigest()
+            ):
+                n_valid_admin_requests += 1
+                return func(*args, **kwargs)
+            else:
+                return jsonify_error("invalid auth key"), 401
+
+        return wrapper
+
+    return admin_route_inner
+
+
 class User(UserMixin):
     pass
 
@@ -297,6 +332,11 @@ def hacky_request_file_from_static(filename: str):
         return send_from_directory("static", filename, mimetype="text/html")
     else:
         return "Invalid file type to fetch", 400
+
+
+@app.route("/api/get-n-valid-admin-requests")
+def api_route_get_n_admin_reqs():
+    return jsonify(n_valid_admin_requests=n_valid_admin_requests), 200
 
 
 @app.route("/login")
@@ -332,6 +372,9 @@ def manual_login():
         user.id = user_id
         users[user_id] = user
         login_user(user)
+        get_readable_name_of_user(
+            user_id
+        )  # populate cache on login so I can find a user's user id by username
         return redirect(url_for("index"))
 
     return "Missing login token", 400
@@ -364,8 +407,92 @@ def oauth_callback():
         user.id = user_id
         users[user_id] = user
         login_user(user)
+        get_readable_name_of_user(
+            user_id
+        )  # populate cache on login so I can find a user's user id by username
         return redirect(url_for("index"))
     return "Error in OAuth callback", 401
+
+
+@app.route("/api/set-fake-points", methods=["POST"])
+@admin_route("POST")
+def api_route_set_fake_points():
+    form = get_form_data()
+    amount = form.get("amount")
+    user_id = form.get("user_id")
+    if not isinstance(amount, int):
+        return jsonify_error("invalid amount parameter"), 400
+    if user_id not in user_id_to_readable_name:
+        return (
+            jsonify_error(
+                "user id does not exist or has not logged in on this platform yet"
+            ),
+            400,
+        )
+    user_info = user_management.get_user_info(user_id)
+    cc_utils.fake_points[user_info.public_key] = amount
+    return "", 200
+
+
+@app.route("/api/get-all-users")
+@admin_route("GET")
+def api_get_all_users():
+    out = []
+    for user_id in user_id_to_readable_name:
+        user_info = user_management.get_user_info(user_id)
+        out.append(
+            {
+                "user_id": user_id,
+                "coins_available": cc_utils.get_available_coins(user_info.public_key),
+                "fake_points": user_get_fake_points(user_info.public_key),
+                "total_points": user_get_available_points(user_info),
+                "name": user_id_to_readable_name[user_id],
+            }
+        )
+    return jsonify(out), 200
+
+
+@app.route("/api/get-user-by-id")
+@admin_route("GET")
+def api_get_user_by_id():
+    user_id = get_args_data().get("user_id")
+    if not user_id:
+        return jsonify_error("missing user id"), 400
+    user_info = user_management.get_user_info(user_id)
+    return (
+        jsonify(
+            user_id=user_id,
+            coins_available=cc_utils.get_available_coins(user_info.public_key),
+            fake_points=user_get_fake_points(user_info.public_key),
+            total_points=user_get_available_points(user_info),
+            name=user_id_to_readable_name[user_id],
+        ),
+        200,
+    )
+
+
+@app.route("/api/get-user-by-name")
+@admin_route("GET")
+def api_get_user_by_name():
+    name = get_args_data().get("name")
+    if not name:
+        return jsonify_error("missing name"), 400
+    for user_id, assoc_name in user_id_to_readable_name.items():
+        if name == assoc_name:
+            break
+    else:
+        return jsonify_error("username does not exist"), 400
+    user_info = user_management.get_user_info(user_id)
+    return (
+        jsonify(
+            user_id=user_id,
+            coins_available=cc_utils.get_available_coins(user_info.public_key),
+            fake_points=user_get_fake_points(user_info.public_key),
+            total_points=user_get_available_points(user_info),
+            name=user_id_to_readable_name[user_id],
+        ),
+        200,
+    )
 
 
 @app.route("/api/get-scores")
@@ -649,28 +776,26 @@ def api_get_leaderboard():
     user_amounts = [
         {
             "score": cc_utils.get_available_fake_points(
-                user_management.get_user_info(user_id)
+                user_management.get_user_info(user_id).public_key
             ),
             "name": get_readable_name_of_user(user_id),
         }
         for user_id in users
     ]
-    return sorted(user_amounts, key=lambda info: info["amount"], reverse=True)[:LEADERBOARD_SIZE]
+    return sorted(user_amounts, key=lambda info: info["score"], reverse=True)[
+        :LEADERBOARD_SIZE
+    ]
+
+
+@app.route("/leaderboard")
+def view_leaderboard():
+    return render_template("leaderboard.html"), 200
 
 
 @app.route("/")
 @login_required
 def index():
-    user_id = current_user.id
-    info = user_management.get_user_info(user_id)
-    return (
-        render_template(
-            "index.html",
-            coins_available=cc_utils.get_available_coins(info.public_key),
-            url_for=url_for,
-        ),
-        200,
-    )
+    return render_template("index.html"), 200
 
 
 states = {}
@@ -686,7 +811,7 @@ broker_leverage_min_points_pairs = [
     (150, 2000),
     (30, 1000),
 ]
-BROKER_OPEN_FEE = 0.15  # amount of points it costs to open a position at leverage=1
+BROKER_OPEN_FEE = 0.2  # amount of points it costs to open a position at leverage=1
 BROKER_KEEP_FEE = (
     0.1  # amount of points it costs to keep an open position at leverage=1
 )
@@ -761,6 +886,7 @@ sim = market.MarketSimMix(
     ),
     (user_buy_sell_event_queue, None),
 )
+user_id_to_readable_name = {}
 user_broker_notifications = {}
 MAX_PROFIT_POINTS = 500
 sim_data = []
@@ -786,6 +912,8 @@ cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
 api_headers = {"Authorization": f"Bearer {config['api_key']}"}
 user_management.create_users_table()
 
+n_valid_admin_requests = 0
+
 LEADERBOARD_SIZE = 10
 
 sim_thread = threading.Thread(target=restart_on_crash(run_sim))
@@ -795,4 +923,4 @@ sim_thread.start()
 bg_service_thread.start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
+    app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False, threaded=True)

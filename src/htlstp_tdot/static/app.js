@@ -290,6 +290,14 @@ function closeMenu() {
     document.getElementById("menu").style.width = "0";
 }
 
+const amountField = document.getElementById('amount');
+
+function addToAmount(n) {
+    let value = parseInt(amountField.value) + n;
+    if (value < 1) amountField.value = 1;
+    else amountField.value = value;
+}
+
 // Buy and Sell button event listeners
 document.getElementById('buyButton').addEventListener('click', handleBuy);
 document.getElementById('sellButton').addEventListener('click', handleSell);
@@ -304,17 +312,6 @@ document.getElementById('switchType').addEventListener('click', toggleTradeType)
 document.getElementById('standardBuySell').style.display = 'block';
 document.getElementById('leverageO').style.display = 'none';
 document.getElementById('leverageC').style.display = 'none';
-
-// Use stepUp and stepDown for increment/decrement
-const amountField = document.getElementById('amount');
-document.getElementById('increaseButton').addEventListener('click', () => {
-    amountField.stepUp(); // Increments the amount field by 1 step
-});
-
-document.getElementById('decreaseButton').addEventListener('click', () => {
-    amountField.stepDown(); // Decrements the amount field by 1 step
-    if (parseInt(amountField.value) < 1) amountField.value = 1; // Ensures value doesn't go below 1
-});
 
 // Ensure the input field only accepts valid numbers and prevents empty values
 amountField.addEventListener('input', () => {
