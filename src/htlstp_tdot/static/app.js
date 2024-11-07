@@ -133,11 +133,11 @@ async function fetchData() {
             marketPrices.push(newPrice);
 
             if (marketPrices.length > windowSize) {
+                candleChartCounter = (candleChartCounter - 1) % candleChartBatchSize;
                 marketPrices.shift();
             }
         }
         candlestickData = [];
-        candleChartCounter = (candleChartCounter - data.n_retrieved) % candleChartBatchSize;
         for (let i = candleChartCounter; i < marketPrices.length; i += candleChartBatchSize) {
             const recent = marketPrices.slice(i, i + candleChartBatchSize + 1);
             candlestickData.push({
