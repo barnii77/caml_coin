@@ -26,6 +26,9 @@ from flask_login import (
     current_user,
     login_required,
 )
+import tdot_fake_market as market
+import cc_utils
+import user_management
 
 app = Flask(__name__, static_folder="__this_folder_does_not_exist__")
 
@@ -48,7 +51,7 @@ def run_sim():
                     sim_data.append(sim.step())
                     while len(sim_data) > SIM_DATA_BACKLOG_SIZE:
                         sim_data.pop(0)
-                    next_market_step += 1
+                next_market_step += SIM_BATCH_SIZE
         # only add the fraction of the difference that has actually resulted in steps to avoid skewing the tick rate
         if ideal_batches > 0:
             last_step_time += (t - last_step_time) * n_batches / ideal_batches
@@ -107,10 +110,14 @@ def run_background_services():
 
 @lru_cache
 def get_readable_name_of_user(user_id):
-    return requests.get(
-        f"{config['points_service']}/api/public/user/name/{user_id}",
-        headers=api_headers,
-    ).json().get("value")
+    return (
+        requests.get(
+            f"{config['points_service']}/api/public/user/name/{user_id}",
+            headers=api_headers,
+        )
+        .json()
+        .get("value")
+    )
 
 
 def restart_on_crash(func):
@@ -348,7 +355,10 @@ def oauth_callback():
     user_id = request.args.get("userId")
     state = request.args.get("state")
     if state not in states:
-        return "Invalid login state: Please retry by going back to the login or starting page!", 401
+        return (
+            "Invalid login state: Please retry by going back to the login or starting page!",
+            401,
+        )
     if user_id:
         user = User()
         user.id = user_id
@@ -511,7 +521,7 @@ def api_route_get_market_steps_since(n: int):
                     n_retrieved=next_market_step - n,
                     next_market_step=next_market_step,
                 )
-                if not current_user.is_authenticated  # TODO test auto-selling to make sure is_authenticated works and the broker auto selling feature works as well
+                if not current_user.is_authenticated
                 or not user_broker_notifications.get(current_user.id)
                 else jsonify(
                     market_steps=sim_data_to_json(sim_data[n - next_market_step :]),
@@ -543,7 +553,10 @@ def api_route_broker_open_position():
         not user_get_fake_points(user_info.public_key)
         and user_get_available_points(user_info) < get_coins_to_points_exchange_rate()
     ):
-        return jsonify_error("User has too little base capital to back up his position"), 400
+        return (
+            jsonify_error("User has too little base capital to back up his position"),
+            400,
+        )
 
     leverage = get_form_data().get("leverage")
     if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
@@ -555,9 +568,12 @@ def api_route_broker_open_position():
         requested_leverage_allowed_with_points(real_points, leverage)
     )
     if not leverage_is_allowed:
-        return jsonify_error(
-            f"For this amount of leverage, you need at least {min_points_req_for_leverage}"
-        ), 400
+        return (
+            jsonify_error(
+                f"For this amount of leverage, you need at least {min_points_req_for_leverage}"
+            ),
+            400,
+        )
 
     broker_positions[user_id] = (
         leverage,
@@ -599,7 +615,10 @@ def api_route_broker_close_position():
         )
     )
     return (
-        jsonify(net_earnings=net_earnings, coins_available=cc_utils.get_available_coins(user_info)),
+        jsonify(
+            net_earnings=net_earnings,
+            coins_available=cc_utils.get_available_coins(user_info),
+        ),
         200,
     )
 
@@ -640,123 +659,123 @@ def index():
     )
 
 
+states = {}
+STATE_TIMEOUT = 15
+
+user_buy_sell_event_queue = []
+USER_ACTION_EVENT_SCALE = 0.005
+
+broker_positions = {}
+broker_leverage_min_points_pairs = [
+    (500, 20000),
+    (300, 5000),
+    (150, 2000),
+    (30, 1000),
+]
+BROKER_OPEN_FEE = 0.1  # amount of points it costs to open a position at leverage=1
+BROKER_KEEP_FEE = (
+    0.075  # amount of points it costs to keep an open position at leverage=1
+)
+BROKER_KEEP_FEE_INTERVAL_SECS = 10  # interval in which BROKER_KEEP_FEE is charged
+BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so users can't forget about their position and loose everything to keep fees)
+
+SIM_BATCHES_PER_SECOND = 2  # num sim batches per second
+SIM_BATCH_SIZE = 1  # how many steps are computed in one go to avoid locking too often
+seed = 43
+sim = market.MarketSimMix(
+    (
+        market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
+            base_value=100.0,
+            bounce_back_value=40.0,
+            market_boost_increase_factor=1.0,
+            seed=seed,
+            stddev=0.005,
+            freqs=[
+                1,
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+            ],
+            extra_freq_weights=[
+                8,
+                8,
+                8,
+                4,
+                4,
+                4,
+                2,
+                1.5,
+                0.6,
+                0.25,
+                0.125,
+            ],
+            event_decay_factor=0.99999999,
+            event_impact=0.0075,
+            event_boost_weight=50,
+            event_prob=0.02,
+            event_change_trend_min_stds_from_mean=0.4,
+            event_change_trend_weight=1.0,
+        ),
+        market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
+            base_value=0,
+            bounce_back_value=-9999999999999999,
+            market_boost_increase_factor=1.0,
+            seed=seed,
+            stddev=0.06,
+            freqs=[
+                20 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
+                60 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
+            ],
+            extra_freq_weights=[
+                96 / (20 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
+                256 / (60 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
+            ],
+            event_decay_factor=0,
+            event_impact=0,
+            event_boost_weight=0,
+            event_prob=0,
+            event_change_trend_min_stds_from_mean=0,
+            event_change_trend_weight=0,
+        ),
+    ),
+    (user_buy_sell_event_queue, None),
+)
+user_broker_notifications = {}
+MAX_PROFIT_POINTS = 500
+sim_data = []
+next_market_step = 0
+SIM_DATA_BACKLOG_SIZE = 50_000
+users = {}
+sim_data_lock = threading.Lock()
+with open("config.json") as f:
+    config = json.load(f)
+# convert the json repr of beff jezos into a CamlCoinUserInfo object
+_beff_jezos: dict = config["beff_jezos_user_info"]
+config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
+    _beff_jezos["user_id"],
+    int(_beff_jezos["private_key"], base=16).to_bytes(
+        cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
+    ),
+    int(_beff_jezos["public_key"], base=16).to_bytes(
+        cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
+    ),
+)
+beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
+cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
+api_headers = {"Authorization": f"Bearer {config['api_key']}"}
+user_management.create_users_table()
+sim_thread = threading.Thread(target=restart_on_crash(run_sim))
+bg_service_thread = threading.Thread(target=restart_on_crash(run_background_services))
+
+sim_thread.start()
+bg_service_thread.start()
+
 if __name__ == "__main__":
-    import tdot_fake_market as market
-    import cc_utils
-    import user_management
-
-    states = {}
-    STATE_TIMEOUT = 15
-
-    user_buy_sell_event_queue = []
-    USER_ACTION_EVENT_SCALE = 0.005
-
-    broker_positions = {}
-    broker_leverage_min_points_pairs = [(500, 20000), (300, 5000), (150, 2000), (30, 1000)]
-    BROKER_OPEN_FEE = 0.1  # amount of points it costs to open a position at leverage=1
-    BROKER_KEEP_FEE = (
-        0.075  # amount of points it costs to keep an open position at leverage=1
-    )
-    BROKER_KEEP_FEE_INTERVAL_SECS = 10  # interval in which BROKER_KEEP_FEE is charged
-    BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so users can't forget about their position and loose everything to keep fees)
-
-    SIM_BATCHES_PER_SECOND = 2  # num sim batches per second
-    SIM_BATCH_SIZE = (
-        3  # how many steps are computed in one go to avoid locking too often
-    )
-    seed = 43
-    sim = market.MarketSimMix(
-        (
-            market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
-                base_value=100.0,
-                bounce_back_value=40.0,
-                market_boost_increase_factor=1.0,
-                seed=seed,
-                stddev=0.005,
-                freqs=[
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                ],
-                extra_freq_weights=[
-                    8,
-                    8,
-                    8,
-                    4,
-                    4,
-                    4,
-                    2,
-                    1.5,
-                    0.6,
-                    0.25,
-                    0.125,
-                ],
-                event_decay_factor=0.99999999,
-                event_impact=0.0075,
-                event_boost_weight=50,
-                event_prob=0.02,
-                event_change_trend_min_stds_from_mean=0.4,
-                event_change_trend_weight=1.0,
-            ),
-            market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
-                base_value=0,
-                bounce_back_value=-9999999999999999,
-                market_boost_increase_factor=1.0,
-                seed=seed,
-                stddev=0.06,
-                freqs=[
-                    20 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
-                    60 * 15 * SIM_BATCH_SIZE * SIM_BATCHES_PER_SECOND,
-                ],
-                extra_freq_weights=[
-                    96 / (20 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
-                    256 / (60 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
-                ],
-                event_decay_factor=0,
-                event_impact=0,
-                event_boost_weight=0,
-                event_prob=0,
-                event_change_trend_min_stds_from_mean=0,
-                event_change_trend_weight=0,
-            ),
-        ),
-        (user_buy_sell_event_queue, None),
-    )
-    user_broker_notifications = {}
-    MAX_PROFIT_POINTS = 500
-    sim_data = []
-    next_market_step = 0
-    SIM_DATA_BACKLOG_SIZE = 50_000
-    users = {}
-    sim_data_lock = threading.Lock()
-    with open("config.json") as f:
-        config = json.load(f)
-    # convert the json repr of beff jezos into a CamlCoinUserInfo object
-    _beff_jezos: dict = config["beff_jezos_user_info"]
-    config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
-        _beff_jezos["user_id"],
-        int(_beff_jezos["private_key"], base=16).to_bytes(
-            cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
-        ),
-        int(_beff_jezos["public_key"], base=16).to_bytes(
-            cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
-        ),
-    )
-    beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
-    cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
-    api_headers = {"Authorization": f"Bearer {config['api_key']}"}
-    user_management.create_users_table()
-    sim_thread = threading.Thread(target=restart_on_crash(run_sim))
-    bg_service_thread = threading.Thread(target=restart_on_crash(run_background_services))
-
-    sim_thread.start()
-    bg_service_thread.start()
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False, threaded=True)
+    app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False)

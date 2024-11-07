@@ -6,3 +6,4 @@ flask
 flask_login
 flask-socketio
 gunicorn
+eventlet

@@ -3,12 +3,12 @@ import math
 from typing import Union, Optional, Tuple
 
 first_names = [
-    "David",
-    "Daniel",
     "Danid",
     "John",
     "Michael",
+    "David",
     "Charlie",
+    "Constantin",
     "Elon",
     "Tom",
     "Andreas",
@@ -18,6 +18,7 @@ first_names = [
     "Tyler",
     "Cameron",
     "Barry",
+    "Daniel",
     "James",
     "Jed",
     "Nick",
@@ -59,16 +60,17 @@ first_names = [
 ]
 
 last_names = [
-    "Harrer",
-    "Gastecker",
     "Garrer",
     "Anderson",
     "Butler",
+    "Harrer",
     "Hoskins",
     "Musk",
+    "Gastecker",
     "Anton",
     "Finney",
     "Wright",
+    "Hulek",
     "Johnson",
     "Lee",
     "Winters",
