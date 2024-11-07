@@ -11,11 +11,14 @@ const windowSize = 500;
 const barWidthScale = 0.0045;
 let candleChartCounter = 5;
 const candleChartBatchSize = 5;
+const canvasDefaultWidth = canvas.width;
+const canvasDefaultHeight = canvas.height;
+const canvasSizeToWindowSizeRatio = 0.8;
 
 // Function to resize canvas dynamically
 function resizeCanvas() {
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    canvas.width = Math.min(window.innerWidth * canvasSizeToWindowSizeRatio, canvasDefaultWidth);
+    canvas.height = Math.min(window.innerHeight * canvasSizeToWindowSizeRatio, canvasDefaultHeight);
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
@@ -158,17 +161,6 @@ async function fetchData() {
 drawLineChart();
 setInterval(fetchData, 500); // Fetch new data every 500ms
 
-// Toggle between line and candlestick charts
-document.getElementById('lineChartButton').addEventListener('click', () => {
-    isCandlestick = false;
-    drawLineChart();
-});
-
-document.getElementById('candlestickChartButton').addEventListener('click', () => {
-    isCandlestick = true;
-    drawCandlestickChart();
-});
-
 function updateAvailableCoins(coins) {
     document.getElementById('coinsAvailable').textContent = "You have " + coins.toString() + " CC";
 }
@@ -234,7 +226,7 @@ async function onOpenPosition() {
         console.error("Error buying coins:", error);
         return;
     }
-    document.getElementById("removeOnOpenPosition").style.display = "none";
+    document.getElementById("leverageO").style.display = "none";
 }
 
 async function onClosePosition() {
@@ -256,7 +248,7 @@ async function onClosePosition() {
         console.error("Error buying coins:", error);
         return;
     }
-    document.getElementById("removeOnOpenPosition").style.display = "";
+    document.getElementById("leverageO").style.display = "";
 }
 
 // Function to toggle between standard and leverage sections
@@ -280,26 +272,6 @@ function toggleTradeType() {
 
 // Toggle between Line and Candlestick charts
 function toggleChartType() {
-    isCandlestick = !isCandlestick;
-    if (isCandlestick) {
-        drawCandlestickChart();
-    } else {
-        drawLineChart();
-    }
-}
-
-// Open the sliding menu
-function openMenu() {
-    document.getElementById("menu").style.width = "250px";
-}
-
-// Close the sliding menu
-function closeMenu() {
-    document.getElementById("menu").style.width = "0";
-}
-
-// Toggle between Line and Candlestick charts
-function toggleChartType() {
     isCandlestick = !isCandlestick; // Toggle between true and false
     if (isCandlestick) {
         drawCandlestickChart(); // Redraw candlestick chart if true
@@ -308,8 +280,6 @@ function toggleChartType() {
     }
 }
 
-
-
 // Open the sliding menu
 function openMenu() {
     document.getElementById("menu").style.width = "250px";
@@ -319,11 +289,6 @@ function openMenu() {
 function closeMenu() {
     document.getElementById("menu").style.width = "0";
 }
-
-
-// Add event listener to the change chart type button
-document.getElementById('changeChartType').addEventListener('click', toggleChartType);
-
 
 // Buy and Sell button event listeners
 document.getElementById('buyButton').addEventListener('click', handleBuy);
@@ -357,4 +322,3 @@ amountField.addEventListener('input', () => {
         amountField.value = 1;
     }
 });
-

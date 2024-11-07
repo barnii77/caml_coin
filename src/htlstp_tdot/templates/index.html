@@ -8,24 +8,39 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div id="coinsAvailable">You have 0 CC</div>
-<div id="eventTicker" class="event-ticker">Market is stable...</div>
+    <span class="menu-icon" onclick="openMenu()">&#9776; Menu</span>
+    <h1 id="coinsAvailable">You have 0 CC</h1>
+    <div id="eventTicker" class="event-ticker">Market is stable...</div>
 
-<span class="menu-icon" onclick="openMenu()">&#9776; Menu</span>
-
-<div id="menu">
-    <a class="closebtn" onclick="closeMenu()">&times;</a>
-    <a id="changeTradeType" onclick="toggleTradeType()">Change Trading Type</a>
-    <a id="changeChartType" onclick="toggleChartType()">Change Chart Type</a>
-</div>
-
-<div id="main">
-    <div class="chart-container">
-        <canvas id="cryptoChart" width="800" height="400"></canvas>
+    <div id="menu">
+        <a href="javascript:void(0)" class="closebtn" onclick="closeMenu()">&times;</a>
+        <a id="changeTradeType" href="javascript:void(0)" onclick="toggleTradeType()">Change Trading Type</a>
+        <a id="changeChartType" href="javascript:void(0)" onclick="toggleChartType()">Change Chart Type</a>
     </div>
 
-    <div class="trade-controls">
-        <div id="standardBuySell">
+    <div id="main">
+        <div class="chart-container">
+            <canvas id="cryptoChart" width="800" height="400"></canvas>
+        </div>
+
+        <div class="trade-controls">
+            <div id="standardBuySell">
+                <div class="button-row">
+                    <button id="buyButton">Buy CamlCoin</button>
+                    <button id="sellButton">Sell CamlCoin</button>
+                </div>
+            </div>
+
+            <div class="button-row">
+                <div id="leverageO" style="display:none;">
+                    <button id="openPosition">Open Position at CamlCoin Broker AG</button>
+                </div>
+
+                <div id="leverageC" style="display:none;">
+                    <button id="closePosition">Close Position</button>
+                </div>
+            </div>
+
             <div class="amount-container">
                 <label for="amount"><b>Amount:</b></label>
                 <div class="amount-control">
@@ -34,25 +49,12 @@
                     <button id="increaseButton">+</button>
                 </div>
             </div>
-            <div class="button-row">
-                <button id="buyButton">Buy CamlCoin</button>
-                <button id="sellButton">Sell CamlCoin</button>
-            </div>
         </div>
 
-        <div id="leverageO" style="display:none;">
-            <button id="openPosition">Open Position at CamlCoin Broker AG</button>
-        </div>
-
-        <div id="leverageC" style="display:none;">
-            <button id="closePosition">Close Position</button>
-        </div>
+        <div id="customAlert" class="custom-alert"></div>
     </div>
 
-    <div id="customAlert" class="custom-alert"></div>
-</div>
-
-<!-- Link to the JavaScript file in the static folder -->
-<script src="/static/app.js"></script>
+    <!-- Link to the JavaScript file in the static folder -->
+    <script src="/static/app.js"></script>
 </body>
 </html>

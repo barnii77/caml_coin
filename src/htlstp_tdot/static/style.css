@@ -81,6 +81,7 @@ canvas {
     display: flex;
     flex-direction: column;
     align-items: center;
+    margin-inline: auto;
     gap: 10px;
     width: 100%;
     max-width: 600px;
@@ -210,43 +211,48 @@ input[type="number"] {
     }
 }
 
-/* Style the menu icon */
+/* Style for the sliding menu */
+#menu {
+    height: 100%;
+    width: 250px;  /* Adjust width as needed */
+    position: fixed;
+    z-index: 9999;  /* Ensure it stays on top of everything */
+    top: 0;
+    left: 0;  /* Fixes the menu to the left side */
+    background-color: #111;
+    overflow-x: hidden;
+    transition: 0.5s;
+    padding-top: 60px;  /* Adjust if you have a header or title at the top */
+}
+
+
+#menu a {
+    padding: 8px 8px 8px 32px;
+    text-decoration: none;
+    font-size: 25px;
+    color: #818181;
+    display: block;
+    transition: 0.3s;
+}
+
+#menu a:hover {
+    color: #f1f1f1;
+}
+
+#menu .closebtn {
+    position: absolute;
+    top: 0;
+    right: 25px;
+    font-size: 54px;
+    margin-left: 50px;
+}
+
+/* Menu icon to open the menu */
 .menu-icon {
-    font-size: 30px;
-    cursor: pointer;
     position: absolute;
     top: 10px;
     left: 10px;
-    z-index: 10;
-}
-
-/* Style the sliding menu */
-.menu {
-    position: fixed;
-    top: 0;
-    left: -50%; /* Start off-screen */
-    width: 50%;  /* Take up half the screen width */
-    height: 100%;  /* Full height of the screen */
-    background-color: #fff;
-    box-shadow: 2px 0 5px rgba(0, 0, 0, 0.3);
-    transition: left 0.3s ease-in-out; /* Smooth transition for sliding */
-    padding: 20px;
-    z-index: 5; /* Ensure it stays above other content */
-}
-
-/* Style buttons inside the menu */
-.menu button {
-    display: block;
-    padding: 10px;
-    margin: 5px 0;
-    width: 100%;
+    font-size: 30px;
+    color: #fff;
     cursor: pointer;
-    background-color: #f0f0f0;
-    border: 1px solid #ccc;
-    border-radius: 5px;
-}
-
-/* Make the menu visible when it's opened */
-.menu.open {
-    left: 0; /* Move the menu into view */
 }

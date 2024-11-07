@@ -254,7 +254,7 @@ def get_user_id_from_login_token(login_token) -> str:
         f"{config['points_service']}/api/auth/user?token={login_token}",
         headers=api_headers,
     )
-    return resp.text[1:-1]
+    return resp.json().get("value")
 
 
 def is_valid_user_id(user_id) -> bool:
@@ -644,6 +644,20 @@ def api_route_get_broker_params():
     )
 
 
+@app.route("/api/get-leaderboard")
+def api_get_leaderboard():
+    user_amounts = [
+        {
+            "score": cc_utils.get_available_fake_points(
+                user_management.get_user_info(user_id)
+            ),
+            "name": get_readable_name_of_user(user_id),
+        }
+        for user_id in users
+    ]
+    return sorted(user_amounts, key=lambda info: info["amount"], reverse=True)[:LEADERBOARD_SIZE]
+
+
 @app.route("/")
 @login_required
 def index():
@@ -672,9 +686,9 @@ broker_leverage_min_points_pairs = [
     (150, 2000),
     (30, 1000),
 ]
-BROKER_OPEN_FEE = 0.1  # amount of points it costs to open a position at leverage=1
+BROKER_OPEN_FEE = 0.15  # amount of points it costs to open a position at leverage=1
 BROKER_KEEP_FEE = (
-    0.075  # amount of points it costs to keep an open position at leverage=1
+    0.1  # amount of points it costs to keep an open position at leverage=1
 )
 BROKER_KEEP_FEE_INTERVAL_SECS = 10  # interval in which BROKER_KEEP_FEE is charged
 BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so users can't forget about their position and loose everything to keep fees)
@@ -719,7 +733,7 @@ sim = market.MarketSimMix(
             event_decay_factor=0.99999999,
             event_impact=0.0075,
             event_boost_weight=50,
-            event_prob=0.02,
+            event_prob=0.08,
             event_change_trend_min_stds_from_mean=0.4,
             event_change_trend_weight=1.0,
         ),
@@ -771,6 +785,9 @@ beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
 cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
 api_headers = {"Authorization": f"Bearer {config['api_key']}"}
 user_management.create_users_table()
+
+LEADERBOARD_SIZE = 10
+
 sim_thread = threading.Thread(target=restart_on_crash(run_sim))
 bg_service_thread = threading.Thread(target=restart_on_crash(run_background_services))
 
@@ -778,4 +795,4 @@ sim_thread.start()
 bg_service_thread.start()
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
