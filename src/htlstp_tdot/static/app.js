@@ -133,11 +133,11 @@ async function fetchData() {
             marketPrices.push(newPrice);
 
             if (marketPrices.length > windowSize) {
+                candleChartCounter = (candleChartCounter - 1) % candleChartBatchSize;
                 marketPrices.shift();
             }
         }
         candlestickData = [];
-        candleChartCounter = (candleChartCounter - data.n_retrieved) % candleChartBatchSize;
         for (let i = candleChartCounter; i < marketPrices.length; i += candleChartBatchSize) {
             const recent = marketPrices.slice(i, i + candleChartBatchSize + 1);
             candlestickData.push({
@@ -259,12 +259,86 @@ async function onClosePosition() {
     document.getElementById("removeOnOpenPosition").style.display = "";
 }
 
+// Function to toggle between standard and leverage sections
+function toggleTradeType() {
+    const standardBuySell = document.getElementById('standardBuySell');
+    const leverageO = document.getElementById('leverageO');
+    const leverageC = document.getElementById('leverageC');
+
+    if (standardBuySell.style.display === 'none') {
+        // Show standard trade controls, hide leverage controls
+        standardBuySell.style.display = 'block';
+        leverageO.style.display = 'none';
+        leverageC.style.display = 'none';
+    } else {
+        // Show leverage controls, hide standard trade controls
+        standardBuySell.style.display = 'none';
+        leverageO.style.display = 'block';
+        leverageC.style.display = 'block';
+    }
+}
+
+// Toggle between Line and Candlestick charts
+function toggleChartType() {
+    isCandlestick = !isCandlestick;
+    if (isCandlestick) {
+        drawCandlestickChart();
+    } else {
+        drawLineChart();
+    }
+}
+
+// Open the sliding menu
+function openMenu() {
+    document.getElementById("menu").style.width = "250px";
+}
+
+// Close the sliding menu
+function closeMenu() {
+    document.getElementById("menu").style.width = "0";
+}
+
+// Toggle between Line and Candlestick charts
+function toggleChartType() {
+    isCandlestick = !isCandlestick; // Toggle between true and false
+    if (isCandlestick) {
+        drawCandlestickChart(); // Redraw candlestick chart if true
+    } else {
+        drawLineChart(); // Redraw line chart if false
+    }
+}
+
+
+
+// Open the sliding menu
+function openMenu() {
+    document.getElementById("menu").style.width = "250px";
+}
+
+// Close the sliding menu
+function closeMenu() {
+    document.getElementById("menu").style.width = "0";
+}
+
+
+// Add event listener to the change chart type button
+document.getElementById('changeChartType').addEventListener('click', toggleChartType);
+
+
 // Buy and Sell button event listeners
 document.getElementById('buyButton').addEventListener('click', handleBuy);
 document.getElementById('sellButton').addEventListener('click', handleSell);
 
 document.getElementById('openPosition').addEventListener('click', onOpenPosition);
 document.getElementById('closePosition').addEventListener('click', onClosePosition);
+
+// Add event listener to the switch button
+document.getElementById('switchType').addEventListener('click', toggleTradeType);
+
+// Initialize with only the standard section visible
+document.getElementById('standardBuySell').style.display = 'block';
+document.getElementById('leverageO').style.display = 'none';
+document.getElementById('leverageC').style.display = 'none';
 
 // Use stepUp and stepDown for increment/decrement
 const amountField = document.getElementById('amount');
@@ -283,3 +357,4 @@ amountField.addEventListener('input', () => {
         amountField.value = 1;
     }
 });
+

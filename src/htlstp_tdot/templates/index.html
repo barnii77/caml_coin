@@ -4,60 +4,55 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CamlCoin Trading</title>
-    <!-- Link to local CSS file -->
-    <link rel="stylesheet" href="/static/style.css">
+    <!-- Link to the CSS file in the static folder -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <h1 id="coinsAvailable" style="top: 0; left: 0;">You have 0 CC</h1>
-    <!-- Event Ticker at the Top -->
+    <div id="coinsAvailable">You have 0 CC</div>
     <div id="eventTicker" class="event-ticker">Market is stable...</div>
+    
+    <span class="menu-icon" onclick="openMenu()">&#9776; Menu</span>
 
-    <div class="chart-container">
-        <canvas id="cryptoChart"></canvas>
+    <div id="menu">
+        <a class="closebtn" onclick="closeMenu()">&times;</a>
+        <a id="changeTradeType" onclick="toggleTradeType()">Change Trading Type</a>
+        <a id="changeChartType" onclick="toggleChartType()">Change Chart Type</a>
     </div>
 
-    <!-- Buy/Sell Controls -->
-    <div class="trade-controls">
-        <div id="removeOnOpenPosition">
-            <div class="amount-container">
-                <label for="amount"><b>Amount:</b></label>
-                <div class="amount-control">
-                    <button id="decreaseButton">-</button>
-                    <input type="number" id="amount" value="1" min="1">
-                    <button id="increaseButton">+</button>
+    <div id="main">
+        <div class="chart-container">
+            <canvas id="cryptoChart" width="800" height="400"></canvas>
+        </div>
+
+        <div class="trade-controls">
+            <div id="standardBuySell">
+                <div class="amount-container">
+                    <label for="amount"><b>Amount:</b></label>
+                    <div class="amount-control">
+                        <button id="decreaseButton">-</button>
+                        <input type="number" id="amount" value="1" min="1">
+                        <button id="increaseButton">+</button>
+                    </div>
+                </div>
+                <div class="button-row">
+                    <button id="buyButton">Buy CamlCoin</button>
+                    <button id="sellButton">Sell CamlCoin</button>
                 </div>
             </div>
 
-            <!-- Grouping Buy and Sell buttons -->
-            <div class="button-row">
-		<button id="switchType">Standard/Leverage</button>
-		<div id="standardBuySell">
-                	<button id="buyButton">Buy CamlCoin</button>
-                	<button id="sellButton">Sell CamlCoin</button>
-		</div>
+            <div id="leverageO" style="display:none;">
+                <button id="openPosition">Open Position at CamlCoin Broker AG</button>
             </div>
 
-            <!-- Grouping Open and Close Position buttons -->
-            <div class="button-row">
-		<div id="leverageO">
-                	<button id="openPosition">Open Position at CamlCoin Broker AG</button>
-		</div>
+            <div id="leverageC" style="display:none;">
+                <button id="closePosition">Close Position</button>
             </div>
         </div>
-	<div id="leverageC">
-        <button id="closePosition">Close Position</button>
-	</div>
+
+        <div id="customAlert" class="custom-alert"></div>
     </div>
 
-    <!-- Chart Controls -->
-    <div class="controls button-row">
-        <button id="lineChartButton">Line Chart</button>
-        <button id="candlestickChartButton">Candlestick Chart</button>
-    </div>
-
-    <div id="customAlert" class="custom-alert"></div>
-
-    <!-- Link to local JavaScript file -->
-    <script src="/static/app.js"></script>
+    <!-- Link to the JavaScript file in the static folder -->
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
