@@ -30,16 +30,23 @@
 
             <!-- Grouping Buy and Sell buttons -->
             <div class="button-row">
-                <button id="buyButton">Buy CamlCoin</button>
-                <button id="sellButton">Sell CamlCoin</button>
+		<button id="switchType">Standard/Leverage</button>
+		<div id="standardBuySell">
+                	<button id="buyButton">Buy CamlCoin</button>
+                	<button id="sellButton">Sell CamlCoin</button>
+		</div>
             </div>
 
             <!-- Grouping Open and Close Position buttons -->
             <div class="button-row">
-                <button id="openPosition">Open Position at CamlCoin Broker AG</button>
+		<div id="leverageO">
+                	<button id="openPosition">Open Position at CamlCoin Broker AG</button>
+		</div>
             </div>
         </div>
+	<div id="leverageC">
         <button id="closePosition">Close Position</button>
+	</div>
     </div>
 
     <!-- Chart Controls -->
