@@ -414,6 +414,36 @@ def oauth_callback():
     return "Error in OAuth callback", 401
 
 
+@app.route("/api/reset-market", methods=["POST"])
+@admin_route("POST")
+def api_route_reset_market():
+    global seed, next_market_step
+    with sim_data_lock:
+        seed = get_form_data().get("seed", seed)
+        next_market_step = 0
+        sim_data.clear()
+        if isinstance(sim, market.MarketSimMix):
+            for s in sim.sims:
+                s.market_boost = 1
+                s.event_boost = 0.0
+                s.price = 0
+                s.step_counter = 1
+                s.noise_values = {
+                    freq: [market.random.gauss(0, s.stddev), market.random.gauss(0, s.stddev)]
+                    for freq in s.noise_frequencies
+                }
+        else:
+            sim.market_boost = 1
+            sim.event_boost = 0.0
+            sim.price = 0
+            sim.step_counter = 1
+            sim.noise_values = {
+                freq: [market.random.gauss(0, sim.stddev), market.random.gauss(0, sim.stddev)]
+                for freq in sim.noise_frequencies
+            }
+    return "", 200
+
+
 @app.route("/api/set-fake-points", methods=["POST"])
 @admin_route("POST")
 def api_route_set_fake_points():
