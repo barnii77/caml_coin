@@ -32,13 +32,13 @@
             background-color: #222222;
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
             border-radius: 8px;
-            color: #ffdd00;
+            color: #ffdd00; /* Primary accent color */
         }
 
         h2 {
             text-align: center;
             font-size: 24px;
-            color: #ffdd00;
+            color: #ffdd00; /* Header color matching theme */
             margin-bottom: 20px;
         }
 
@@ -54,8 +54,7 @@
             border-radius: 4px;
             display: flex;
             justify-content: space-between;
-            color: #ffdd00;
-            transition: transform 0.5s ease, background-color 0.5s ease;
+            color: #ffdd00; /* Text color */
         }
 
         .name {
@@ -73,31 +72,6 @@
             font-weight: bold;
             margin-top: 10px;
         }
-
-        /* Animations */
-        .moved-up {
-            transform: translateY(-10px);
-            background-color: #4CAF50; /* Green for moving up */
-        }
-
-        .moved-down {
-            transform: translateY(10px);
-            background-color: #f44336; /* Red for moving down */
-        }
-
-        .new-entry {
-            animation: fadeIn 0.5s ease-in;
-        }
-
-        /* Keyframe for fade-in animation */
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-            }
-            to {
-                opacity: 1;
-            }
-        }
     </style>
 </head>
 <body>
@@ -112,8 +86,8 @@
 
 <script>
     // Flask API route URL to fetch leaderboard data
-    const leaderboardAPI = '/api/leaderboard';
-    let previousLeaderboard = []; // Stores the previous leaderboard for comparison
+    const leaderboardAPI = '/api/get-leaderboard';
+    let previousLeaderboard = [];
 
     async function fetchLeaderboard() {
         try {
@@ -132,41 +106,40 @@
         }
     }
 
-    // Function to render leaderboard with animations
-    function displayLeaderboard(newLeaderboard) {
+    // Function to render leaderboard
+    function displayLeaderboard(data) {
         const leaderboardList = document.getElementById("leaderboard-list");
         leaderboardList.innerHTML = ''; // Clear existing items
         document.getElementById("error-message").textContent = ''; // Clear error message if any
 
-        newLeaderboard.forEach((player, index) => {
+        // Assuming data is a dictionary with "name" and "score" for each entry
+        data.forEach((player, index) => {
             const listItem = document.createElement("li");
 
             listItem.innerHTML = `
             <span class="name">${index + 1}. ${player.name}</span>
             <span class="score">${player.score}</span>
         `;
+        const previousIndex = previousLeaderboard.findIndex(prev => prev.name === player.name);
 
-            // Determine if the player has moved up, down, or is new
-            const previousIndex = previousLeaderboard.findIndex(prev => prev.name === player.name);
-
-            if (previousIndex === -1) {
-                // Player is new to the leaderboard
-                listItem.classList.add("new-entry");
-            } else if (previousIndex > index) {
-                // Player moved up
-                listItem.classList.add("moved-up");
-            } else if (previousIndex < index) {
-                // Player moved down
-                listItem.classList.add("moved-down");
-            }
+        if (previousIndex === -1) {
+            // Player is new to the leaderboard
+            listItem.classList.add("new-entry");
+        } else if (previousIndex > index) {
+            // Player moved up
+            listItem.classList.add("moved-up");
+        } else if (previousIndex < index) {
+            // Player moved down
+            listItem.classList.add("moved-down");
+        }
 
             leaderboardList.appendChild(listItem);
         });
     }
 
-    // Initial fetch and set interval to refetch every 10 seconds
-    fetchLeaderboard();
-    setInterval(fetchLeaderboard, 10000); // 10000 ms = 10 seconds
+    // Fetch and display leaderboard on page load
+    window.onload = fetchLeaderboard;
+    setInterval(fetchLeaderboard, 10000);
 </script>
 
 </body>
