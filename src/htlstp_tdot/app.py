@@ -855,7 +855,7 @@ sim = market.MarketSimMix(
     (
         market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
             base_value=100.0,
-            bounce_back_value=40.0,
+            bounce_back_value=70.0,
             market_boost_increase_factor=1.0,
             seed=seed,
             stddev=0.005,
@@ -894,7 +894,7 @@ sim = market.MarketSimMix(
         ),
         market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
             base_value=0,
-            bounce_back_value=-50,
+            bounce_back_value=-40,
             market_boost_increase_factor=1.0,
             seed=seed,
             stddev=0.06,
