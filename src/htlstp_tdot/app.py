@@ -731,7 +731,7 @@ def api_route_broker_open_position():
     if not leverage_is_allowed:
         return (
             jsonify_error(
-                f"For this amount of leverage, you need at least {min_points_req_for_leverage}"
+                f"For this amount of leverage, you need at least {min_points_req_for_leverage} points"
             ),
             400,
         )
