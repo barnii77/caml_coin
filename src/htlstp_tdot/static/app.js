@@ -1,8 +1,5 @@
 console.log("app.js loaded successfully");
 
-import Mutex from 'async-mutex';
-let fetchDataMutex = new Mutex();
-
 let marketPrices = [];
 let candlestickData = [];
 

@@ -559,7 +559,8 @@ def api_route_buy():
         return jsonify_error("Unable to retrieve your point score"), 400
     if amount > user_amount_available:
         amount = user_amount_available
-    if amount > 0:
+        n_coins_bought = int(amount * get_points_to_coins_exchange_rate())
+    if n_coins_bought > 0:
         try:
             cc_utils.send_coins(
                 config["beff_jezos_user_info"], user_info.public_key, n_coins_bought
