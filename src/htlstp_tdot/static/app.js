@@ -1,5 +1,8 @@
 console.log("app.js loaded successfully");
 
+import Mutex from 'async-mutex';
+let fetchDataMutex = new Mutex();
+
 let marketPrices = [];
 let candlestickData = [];
 
@@ -119,6 +122,10 @@ async function fetchData() {
         const response = await fetch("/api/market/steps-since/" + nextMarketStep);
         const data = await response.json();
         if (!data.hasOwnProperty('next_market_step')) {
+            return;
+        }
+        if (data.next_market_step !== nextMarketStep + data.market_steps.length || data.n_retrieved !== data.market_steps.length) {
+            console.log("invalid response received from server in fetchData");
             return;
         }
         nextMarketStep = data.next_market_step;
