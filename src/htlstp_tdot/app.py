@@ -258,12 +258,15 @@ def requested_leverage_allowed_with_points(
     return True, -1
 
 
-def get_user_id_from_login_token(login_token) -> str:
+def get_user_id_from_login_token(login_token) -> Optional[str]:
     resp = requests.get(
         f"{config['points_service']}/api/auth/user?token={login_token}",
         headers=api_headers,
     )
-    return resp.json().get("value")
+    try:
+        return resp.json().get("value")
+    except requests.exceptions.JSONDecodeError:
+        return None
 
 
 def is_valid_user_id(user_id) -> bool:
@@ -367,7 +370,7 @@ def manual_login():
     if login_token:
         user_id = get_user_id_from_login_token(login_token)
         if not user_id:
-            return "Invalid token", 400
+            return jsonify_error("invalid login token"), 400
         user = User()
         user.id = user_id
         users[user_id] = user
@@ -377,7 +380,7 @@ def manual_login():
         )  # populate cache on login so I can find a user's user id by username
         return redirect(url_for("index"))
 
-    return "Missing login token", 400
+    return jsonify_error("missing login token"), 400
 
 
 @app.route("/logout")
