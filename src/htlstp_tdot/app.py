@@ -76,6 +76,10 @@ def run_background_services():
             open_time,
         ) in kv:
             user_info = user_management.get_user_info(user_id)
+            gain = leverage * (get_coins_to_points_exchange_rate() - open_exchange_rate)
+            a, b = get_min_backup_capital_for_leverage(leverage)
+            min_required_backup_capital = a * get_coins_to_points_exchange_rate() + b
+
             if t - open_time >= BROKER_MAX_HOLD_TIME_SECS:
                 user_close_position(user_management.get_user_info(user_id))
                 if user_id not in user_broker_notifications:
@@ -84,19 +88,16 @@ def run_background_services():
                     "Broker auto-closed your position because the time limit for open positions has been exceeded"
                 )
             elif (
-                not user_get_fake_points(
-                    user_info.public_key
-                )  # technically redundant, but helps short-circuit networking when possible
-                and user_get_available_points(
-                    user_info
-                )  # user is considered too low on backup capital when he can't afford a single coin
-                < get_coins_to_points_exchange_rate()
+                user_get_fake_points(user_info.public_key) + gain
+                <= min_required_backup_capital
+                and user_get_available_points(user_info) + gain
+                < min_required_backup_capital
             ):
                 user_close_position(user_management.get_user_info(user_id))
                 if user_id not in user_broker_notifications:
                     user_broker_notifications[user_id] = []
                 user_broker_notifications[user_id].append(
-                    "Broker auto-closed your position because you dropped too low in backup capital (you must be able to afford at least 1 caml coin to be able to open and hold a position)"
+                    f"Broker auto-closed your position because you dropped too low in backup capital for your selected leverage (you must have least {min_required_backup_capital} points)"
                 )
             elif (
                 open_exchange_rate >= get_coins_to_points_exchange_rate() * 2
@@ -105,7 +106,7 @@ def run_background_services():
                 if user_id not in user_broker_notifications:
                     user_broker_notifications[user_id] = []
                 user_broker_notifications[user_id].append(
-                    "Broker auto-closed your position because you have made a 50% loss and EU broker regulations require closing the position for the user"
+                    "Broker auto-closed your position because you have made a 50% or more loss and EU broker regulations require CamlCoin Broker AG to close your position."
                 )
 
 
@@ -170,6 +171,7 @@ def user_close_position(user_info) -> int:
 
 
 def user_get_fake_points(public_key) -> int:
+    # have to do this sub because first MAX_PROFIT_POINTS fake points are synced with points service
     return (
         max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(public_key))
         - MAX_PROFIT_POINTS
@@ -177,11 +179,7 @@ def user_get_fake_points(public_key) -> int:
 
 
 def user_get_available_points(user_info) -> int:
-    # have to do this sub because first MAX_PROFIT_POINTS fake points are synced with points service
-    fake_points = (
-        max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(user_info.public_key))
-        - MAX_PROFIT_POINTS
-    )
+    fake_points = user_get_fake_points(user_info.public_key)
     resp = requests.get(
         f"{config['points_service']}/api/public/user/points/{user_info.user_id}",
         headers=api_headers,
@@ -256,6 +254,15 @@ def requested_leverage_allowed_with_points(
         if leverage >= lev and user_real_points < min_fake_points_req:
             return False, min_fake_points_req
     return True, -1
+
+
+def get_min_backup_capital_for_leverage(leverage: int):
+    for lev, setting in broker_leverage_min_backup_capital_pairs:
+        if leverage >= lev:
+            return setting
+    raise RuntimeError(
+        "invalid configuration of broker_leverage_min_backup_capital_pairs or invalid value of leverage"
+    )
 
 
 def get_user_id_from_login_token(login_token) -> Optional[str]:
@@ -432,7 +439,10 @@ def api_route_reset_market():
                 s.price = 0
                 s.step_counter = 1
                 s.noise_values = {
-                    freq: [market.random.gauss(0, s.stddev), market.random.gauss(0, s.stddev)]
+                    freq: [
+                        market.random.gauss(0, s.stddev),
+                        market.random.gauss(0, s.stddev),
+                    ]
                     for freq in s.noise_frequencies
                 }
         else:
@@ -441,7 +451,10 @@ def api_route_reset_market():
             sim.price = 0
             sim.step_counter = 1
             sim.noise_values = {
-                freq: [market.random.gauss(0, sim.stddev), market.random.gauss(0, sim.stddev)]
+                freq: [
+                    market.random.gauss(0, sim.stddev),
+                    market.random.gauss(0, sim.stddev),
+                ]
                 for freq in sim.noise_frequencies
             }
     return "", 200
@@ -710,20 +723,24 @@ def api_route_broker_open_position():
         return jsonify_error("User already has open position"), 400
 
     user_info = user_management.get_user_info(user_id)
-    if (
-        not user_get_fake_points(user_info.public_key)
-        and user_get_available_points(user_info) < get_coins_to_points_exchange_rate()
-    ):
-        return (
-            jsonify_error("User has too little base capital to back up his position"),
-            400,
-        )
 
     leverage = get_form_data().get("leverage")
     if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
         return jsonify_error("Invalid leverage"), 400
 
     leverage = int(leverage)
+
+    a, b = get_min_backup_capital_for_leverage(leverage)
+    min_required_backup_capital = a * get_coins_to_points_exchange_rate() + b
+    if (
+        user_get_fake_points(user_info.public_key) < min_required_backup_capital
+        and user_get_available_points(user_info) < min_required_backup_capital
+    ):
+        return (
+            jsonify_error("User has too little base capital to back up his position"),
+            400,
+        )
+
     real_points = user_get_available_points(user_info)
     leverage_is_allowed, min_points_req_for_leverage = (
         requested_leverage_allowed_with_points(real_points, leverage)
@@ -845,7 +862,7 @@ broker_leverage_min_points_pairs = [
     (150, 2000),
     (30, 1000),
 ]
-BROKER_OPEN_FEE = 0.2  # amount of points it costs to open a position at leverage=1
+BROKER_OPEN_FEE = 0.15  # amount of points it costs to open a position at leverage=1
 BROKER_KEEP_FEE = (
     0.1  # amount of points it costs to keep an open position at leverage=1
 )
@@ -920,6 +937,34 @@ sim = market.MarketSimMix(
     ),
     (user_buy_sell_event_queue, None),
 )
+MIN_REACHABLE_PRICE = math.ceil(sum(s.bounce_back_value for s in sim.sims))
+
+broker_leverage_min_backup_capital_pairs = (
+    [  # inner dict is (a, b) pair where min backup capital is a * leverage + b
+        (
+            300,
+            (5, MIN_REACHABLE_PRICE),
+        ),
+        (
+            200,
+            (4, MIN_REACHABLE_PRICE),
+        ),
+        (
+            100,
+            (3, MIN_REACHABLE_PRICE),
+        ),
+        (
+            40,
+            (2, MIN_REACHABLE_PRICE),
+        ),
+        (
+            10,
+            (1, MIN_REACHABLE_PRICE),
+        ),
+        (0, (0, MIN_REACHABLE_PRICE)),
+    ]
+)
+
 user_id_to_readable_name = {}
 user_broker_notifications = {}
 MAX_PROFIT_POINTS = 500
@@ -944,7 +989,7 @@ config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
 beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
 cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
 api_headers = {"Authorization": f"Bearer {config['api_key']}"}
-user_management.create_users_table()
+# user_management.create_users_table()
 
 n_valid_admin_requests = 0
 

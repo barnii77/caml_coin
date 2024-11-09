@@ -127,7 +127,10 @@ async function fetchData() {
         }
         nextMarketStep = data.next_market_step;
         if (data.hasOwnProperty("broker_notification")) {
-            showCustomAlert(data.broker_notification)
+            showCustomAlert(data.broker_notification);
+            if (data.broker_notification.startsWith("Broker auto-closed")) {
+                document.getElementById("leverageO").style.display = "";
+            }
         }
         const ticker = document.getElementById("eventTicker");
         for (const el of data.market_steps) {
@@ -309,9 +312,6 @@ document.getElementById('sellButton').addEventListener('click', handleSell);
 document.getElementById('openPosition').addEventListener('click', onOpenPosition);
 document.getElementById('closePosition').addEventListener('click', onClosePosition);
 
-// Add event listener to the switch button
-document.getElementById('switchType').addEventListener('click', toggleTradeType);
-
 // Initialize with only the standard section visible
 document.getElementById('standardBuySell').style.display = 'block';
 document.getElementById('leverageO').style.display = 'none';
@@ -323,3 +323,16 @@ amountField.addEventListener('input', () => {
         amountField.value = 1;
     }
 });
+
+async function setAvailableCoins() {
+    const response = await fetch("/api/get-scores", {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+    });
+    const respData = await response.json();
+    if (response.ok) {
+        updateAvailableCoins(respData.coins_available);
+    }
+}
+
+(async () => {await setAvailableCoins();})();
