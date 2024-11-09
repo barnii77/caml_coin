@@ -558,12 +558,8 @@ def api_route_get_scores():
 def api_route_buy():
     user_id = current_user.id
     n_coins_bought = get_form_data().get("amount_coins_bought")
-    if (
-        n_coins_bought is None
-        or not n_coins_bought.isdigit()
-        or int(n_coins_bought) <= 0
-    ):
-        return jsonify_error("Invalid amount"), 400
+    if not isinstance(n_coins_bought, int):
+        return jsonify_error("Invalid amount, it must be an integer, but is not"), 400
     n_coins_bought = int(n_coins_bought)
     amount = n_coins_bought * get_coins_to_points_exchange_rate()
     user_info = user_management.get_user_info(user_id)
@@ -609,8 +605,8 @@ def api_route_buy():
 def api_route_sell():
     user_id = current_user.id
     amount_coins = get_form_data().get("amount_coins_sold")
-    if amount_coins is None or not amount_coins.isdigit() or int(amount_coins) <= 0:
-        return jsonify_error("Invalid amount"), 400
+    if not isinstance(amount_coins, int):
+        return jsonify_error("Invalid amount, must be int, but is not"), 400
     amount_coins = int(amount_coins)
     user_info = user_management.get_user_info(user_id)
     user_amount_available = cc_utils.get_available_coins(user_info.public_key)
@@ -725,8 +721,8 @@ def api_route_broker_open_position():
     user_info = user_management.get_user_info(user_id)
 
     leverage = get_form_data().get("leverage")
-    if leverage is None or not leverage.isdigit() or int(leverage) <= 0:
-        return jsonify_error("Invalid leverage"), 400
+    if not isinstance(leverage, int):
+        return jsonify_error("Invalid leverage, must be int, but is not"), 400
 
     leverage = int(leverage)
 

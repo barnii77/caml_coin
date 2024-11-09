@@ -166,7 +166,7 @@ async function fetchData() {
 
 // Initial draw
 drawLineChart();
-setInterval(fetchData, 500); // Fetch new data every 500ms
+setInterval(fetchData, 500);
 
 function updateAvailableCoins(coins) {
     document.getElementById('coinsAvailable').textContent = "You have " + coins.toString() + " CC";
@@ -174,7 +174,7 @@ function updateAvailableCoins(coins) {
 
 // Handle Buy and Sell actions
 async function handleBuy() {
-    const amount = document.getElementById("amount").value;
+    const amount = parseInt(document.getElementById("amount").value);
     try {
         const response = await fetch("/api/buy", {
             method: "POST",
@@ -195,7 +195,7 @@ async function handleBuy() {
 }
 
 async function handleSell() {
-    const amount = document.getElementById("amount").value;
+    const amount = parseInt(document.getElementById("amount").value);
     try {
         const response = await fetch("/api/sell", {
             method: "POST",
@@ -216,7 +216,7 @@ async function handleSell() {
 }
 
 async function onOpenPosition() {
-    const amount = document.getElementById("amount").value;
+    const amount = parseInt(document.getElementById("amount").value);
     try {
         const response = await fetch("/api/broker/open-position", {
             method: "POST",
