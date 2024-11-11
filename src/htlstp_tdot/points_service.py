@@ -54,10 +54,9 @@ def deposit_points(user_id, points):
         conn.close()
         return {"points": infinite_points}
 
-    # Deposit points with max cap of 250 points
     c.execute(
         "UPDATE users SET points = points + ? WHERE user_id = ?",
-        (min(points, 250), user_id),
+        (points, user_id),
     )
     conn.commit()
 

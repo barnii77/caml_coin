@@ -3,7 +3,7 @@
   "api_key": "ce4a8484-e95f-4967-84dc-a2a510e0ff20",
   "htl_points_service": "https://schnitzeljagd.if.htlstp.ac.at",
   "custom_points_service": "https://points.tdot.at",
-  "points_service": "http://127.0.0.1:8001",
+  "points_service": "https://points.tdot.at",
   "max_profit_points": null,
   "beff_jezos_user_info": {
     "user_id": "",
