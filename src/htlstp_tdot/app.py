@@ -1,6 +1,5 @@
 import traceback
 import secrets
-
 import requests
 import threading
 import math
@@ -109,6 +108,20 @@ def run_background_services():
                     "Broker auto-closed your position because you have made a 50% or more loss and EU broker regulations require CamlCoin Broker AG to close your position."
                 )
 
+        # reload the config in case anything has changed
+        try:
+            with open("config.json") as f:
+                new_config = json.load(f)
+            for k, v in new_config.items():
+                config[k] = v
+        except Exception:
+            traceback.format_exc()
+
+        with open("data/cc_utils_balances.json", "w") as f:
+            json.dump(cc_utils.balances, f)
+        with open("data/cc_utils_fake_points.json", "w") as f:
+            json.dump(cc_utils.fake_points, f)
+
 
 def get_readable_name_of_user(user_id):
     if user_id not in user_id_to_readable_name:
@@ -173,8 +186,12 @@ def user_close_position(user_info) -> int:
 def user_get_fake_points(public_key) -> int:
     # have to do this sub because first MAX_PROFIT_POINTS fake points are synced with points service
     return (
-        max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(public_key))
-        - MAX_PROFIT_POINTS
+        0
+        if MAX_PROFIT_POINTS is None
+        else (
+            max(MAX_PROFIT_POINTS, cc_utils.get_available_fake_points(public_key))
+            - MAX_PROFIT_POINTS
+        )
     )
 
 
@@ -189,7 +206,11 @@ def user_get_available_points(user_info) -> int:
 
 def withdraw_points(user_info, amount: int):
     new_fake_points = cc_utils.withdraw_fake_points(user_info.public_key, amount)
-    delta_real = max(amount - max(new_fake_points + amount - MAX_PROFIT_POINTS, 0), 0)
+    delta_real = (
+        amount
+        if MAX_PROFIT_POINTS is None
+        else max(amount - max(new_fake_points + amount - MAX_PROFIT_POINTS, 0), 0)
+    )
     if delta_real:
         requests.post(
             f"{config['points_service']}/api/public/user/withdraw",
@@ -200,7 +221,11 @@ def withdraw_points(user_info, amount: int):
 
 def deposit_points(user_info, amount: int):
     new_fake_points = cc_utils.deposit_fake_points(user_info.public_key, amount)
-    delta_real = max(amount - max(new_fake_points - MAX_PROFIT_POINTS, 0), 0)
+    delta_real = (
+        amount
+        if MAX_PROFIT_POINTS is None
+        else max(amount - max(new_fake_points - MAX_PROFIT_POINTS, 0), 0)
+    )
     if delta_real:
         requests.post(
             f"{config['points_service']}/api/public/user/deposit",
@@ -271,7 +296,10 @@ def get_user_id_from_login_token(login_token) -> Optional[str]:
         headers=api_headers,
     )
     try:
-        return resp.json().get("value")
+        j = resp.json()
+        if "error" in j:
+            return j
+        return j.get("value")
     except requests.exceptions.JSONDecodeError:
         return None
 
@@ -328,6 +356,8 @@ def load_user(user_id):
     return users.setdefault(user_id, user)
 
 
+# flask static file serving was somehow taking forever to respond with the files (on the order of minutes).
+# I tried figuring out why, but ended up just hand-rolling my own static file serving because that's quicker.
 @app.route("/static/<filename>")
 def hacky_request_file_from_static(filename: str):
     if filename.endswith(".css"):
@@ -376,8 +406,10 @@ def manual_login():
     login_token = form.get("token")
     if login_token:
         user_id = get_user_id_from_login_token(login_token)
+        if isinstance(user_id, dict) and "error" in user_id:
+            return jsonify_error(user_id["error"]), 401
         if not user_id:
-            return jsonify_error("invalid login token"), 400
+            return jsonify_error("invalid login token"), 401
         user = User()
         user.id = user_id
         users[user_id] = user
@@ -457,7 +489,28 @@ def api_route_reset_market():
                 ]
                 for freq in sim.noise_frequencies
             }
-    return "", 200
+    return jsonify(), 200
+
+
+@app.route("/api/inject-event", methods=["POST"])
+@admin_route("POST")
+def api_inject_event():
+    form = get_form_data()
+    msg = form.get("message")
+    impact = form.get("impact")
+    sentiment = form.get("sentiment")
+    if not isinstance(impact, (int, float)):
+        return jsonify_error("impact must be int or float, but is not"), 400
+    if not isinstance(sentiment, str):
+        return jsonify_error("sentiment must be a string"), 400
+    if not isinstance(msg, str):
+        return jsonify_error("message must be a string"), 400
+    if sentiment not in ("positive", "negative"):
+        return jsonify_error(
+            "sentiment must be 'positive' or 'negative', not '" + sentiment + "'"
+        )
+    user_buy_sell_event_queue.append((impact * USER_ACTION_EVENT_SCALE, sentiment, msg))
+    return jsonify(), 200
 
 
 @app.route("/api/set-fake-points", methods=["POST"])
@@ -477,7 +530,7 @@ def api_route_set_fake_points():
         )
     user_info = user_management.get_user_info(user_id)
     cc_utils.fake_points[user_info.public_key] = amount
-    return "", 200
+    return jsonify(), 200
 
 
 @app.route("/api/get-all-users")
@@ -572,7 +625,7 @@ def api_route_buy():
     if n_coins_bought > 0:
         try:
             cc_utils.send_coins(
-                config["beff_jezos_user_info"], user_info.public_key, n_coins_bought
+                beff_jezos, user_info.public_key, n_coins_bought
             )
         except Exception as e:
             return (
@@ -618,7 +671,7 @@ def api_route_sell():
         n_points_to_recv = int(amount_coins * get_coins_to_points_exchange_rate())
         try:
             cc_utils.send_coins(
-                user_info, config["beff_jezos_user_info"].public_key, amount_coins
+                user_info, beff_jezos.public_key, amount_coins
             )
         except Exception as e:
             return (
@@ -711,6 +764,7 @@ def api_route_get_next_market_step():
     return jsonify(next_market_step=next_market_step), 200
 
 
+# TODO for correctness, I'd have to add or withdraw cc to a special broker AG pub key
 @app.route("/api/broker/open-position", methods=["POST"])
 @login_required
 def api_route_broker_open_position():
@@ -963,7 +1017,6 @@ broker_leverage_min_backup_capital_pairs = (
 
 user_id_to_readable_name = {}
 user_broker_notifications = {}
-MAX_PROFIT_POINTS = 500
 sim_data = []
 next_market_step = 0
 SIM_DATA_BACKLOG_SIZE = 50_000
@@ -986,6 +1039,10 @@ beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
 cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
 api_headers = {"Authorization": f"Bearer {config['api_key']}"}
 # user_management.create_users_table()
+
+MAX_PROFIT_POINTS = None
+if "max_profit_points" in config:
+    MAX_PROFIT_POINTS = config["max_profit_points"]
 
 n_valid_admin_requests = 0
 

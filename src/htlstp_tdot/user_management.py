@@ -25,7 +25,6 @@ class CamlCoinUserInfo:
         self.public_key = public_key
 
 
-@lru_cache(maxsize=None)
 def get_user_info(user_id):
     keys = get_user_keys(user_id)
     return CamlCoinUserInfo(user_id, keys["private_key"], keys["public_key"])

@@ -1,10 +1,14 @@
 {
+  "not_merged_save_for_later_todo_rename_privileged_api_key": "ce4a8484-e95f-4967-84dc-a2a510e0ff20-5cbc8ebfb7eea9ad16918a07",
   "api_key": "ce4a8484-e95f-4967-84dc-a2a510e0ff20",
-  "points_service": "https://schnitzeljagd.if.htlstp.ac.at",
+  "htl_points_service": "https://schnitzeljagd.if.htlstp.ac.at",
+  "custom_points_service": "https://points.tdot.at",
+  "points_service": "http://127.0.0.1:8001",
+  "max_profit_points": null,
   "beff_jezos_user_info": {
     "user_id": "",
     "private_key": "0x834e46bb167a60aaeedcc66ab5c6d30a4e1fcb97fa780a9f43f45b90db0be400",
     "public_key": "0x03320bffff58a62fdd4ab1f9f858285aa07896395a7435348fd2af4a1cbdcc9f3c"
   },
-  "beff_jezos_wealth": 200000000000
+  "beff_jezos_wealth": 200000000000000000
 }

@@ -1,11 +1,20 @@
+import json
+import traceback
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 
 ENDIAN = "little"
 PRIVATE_KEY_SIZE = 32
 PUBLIC_KEY_SIZE = 33
-balances = {}
-fake_points = {}
+try:
+    with open("data/cc_utils_balances.json") as f:
+        balances = json.load(f)
+    with open("data/cc_utils_fake_points.json") as f:
+        fake_points = json.load(f)
+except Exception:
+    traceback.format_exc()
+    balances = {}
+    fake_points = {}
 
 
 class TooPoorException(Exception):

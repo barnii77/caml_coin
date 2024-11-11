@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Signup</title>
+    <style>
+        /* General Reset */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* Body Styling */
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+
+        /* Form Styling */
+        form {
+            background-color: #222222;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        /* Label Styling */
+        label, h3, a {
+            font-size: 16px;
+            font-weight: bold;
+            color: #ffdd00;
+            margin-bottom: 5px;
+            display: block;
+        }
+
+        /* Input Styling */
+        input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            border-radius: 5px;
+            border: 1px solid #ffdd00;
+            background-color: #333333;
+            color: #ffffff;
+        }
+
+        /* Button Styling */
+        button[type="submit"] {
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            background-color: #007bff;
+            color: #ffffff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        button[type="submit"]:hover {
+            background-color: #0056b3;
+        }
+
+        /* Add spacing between inputs */
+        input,
+        button,
+        label {
+            margin-top: 10px;
+        }
+
+        /* Responsive Styling */
+        @media (max-width: 500px) {
+            form {
+                padding: 20px;
+            }
+
+            button[type="submit"] {
+                font-size: 14px;
+                padding: 10px;
+            }
+
+            input[type="text"] {
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h3>Sign up successful!</h3>
+</body>
+</html>
