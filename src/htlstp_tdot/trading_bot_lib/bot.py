@@ -26,11 +26,13 @@ class TradingBot:
             self.max_history_size = max(self.history_size_constraints)
             return func
         else:
+
             def decorator(func):
                 self.new_data_callbacks.append((func, history_size))
                 self.history_size_constraints.append(history_size)
                 self.max_history_size = max(self.history_size_constraints)
                 return func
+
             return decorator
 
     def on_error(self, func):
@@ -45,8 +47,15 @@ class TradingBot:
     def _fetch_data(self):
         url = f"{self.domain}/api/market/steps-since/{self.next_market_step}"
         response = self.session.get(url)
-        response.raise_for_status()
-        return response.json()
+        return (
+            response.json()
+            if str(response.status_code).startswith("2")
+            else {
+                "n_retrieved": 0,
+                "market_steps": [],
+                "next_market_step": self.next_market_step,
+            }
+        )
 
     def _update_data(self, data_points, next_market_step):
         self.data_history.extend(data_points)
@@ -98,8 +107,10 @@ class TradingBot:
             try:
                 data = self._fetch_data()
                 if "error" not in data:
-                    market_steps = data.get('market_steps', [])
-                    next_market_step = data.get('next_market_step', self.next_market_step)
+                    market_steps = data.get("market_steps", [])
+                    next_market_step = data.get(
+                        "next_market_step", self.next_market_step
+                    )
                     if market_steps:
                         self._update_data(market_steps, next_market_step)
                         self._notify_callbacks()
@@ -110,6 +121,8 @@ class TradingBot:
 
 
 if __name__ == "__main__":
+    import traceback
+
     bot = TradingBot(domain="http://127.0.0.1:8000", user_token=input("login token: "))
     has_bought, has_sold = False, False
 
@@ -144,5 +157,6 @@ if __name__ == "__main__":
     @bot.on_error
     def handle_error(e):
         print(e)
+        print(traceback.format_exc())
 
     bot.start()
