@@ -275,9 +275,10 @@ def sim_data_to_json(
 def requested_leverage_allowed_with_points(
     user_real_points, leverage: int
 ) -> tuple[bool, int]:
-    for lev, min_fake_points_req in broker_leverage_min_points_pairs:
-        if leverage >= lev and user_real_points < min_fake_points_req:
-            return False, min_fake_points_req
+    a, b = get_min_backup_capital_for_leverage(leverage)
+    min_fake_points_req = math.ceil(get_coins_to_points_exchange_rate() * a + b)
+    if user_real_points < min_fake_points_req:
+        return False, min_fake_points_req
     return True, -1
 
 
@@ -764,7 +765,8 @@ def api_route_get_next_market_step():
     return jsonify(next_market_step=next_market_step), 200
 
 
-# TODO for correctness, I'd have to add or withdraw cc to a special broker AG pub key
+# for correctness, I'd have to add or withdraw cc to a special broker AG pub key...
+# except that Beff Jezos owns the CamlCoin Broker AG!!!!!
 @app.route("/api/broker/open-position", methods=["POST"])
 @login_required
 def api_route_broker_open_position():
@@ -903,15 +905,9 @@ states = {}
 STATE_TIMEOUT = 15
 
 user_buy_sell_event_queue = []
-USER_ACTION_EVENT_SCALE = 0.005
+USER_ACTION_EVENT_SCALE = 0.0001
 
 broker_positions = {}
-broker_leverage_min_points_pairs = [
-    (500, 20000),
-    (300, 5000),
-    (150, 2000),
-    (30, 1000),
-]
 BROKER_OPEN_FEE = 0.15  # amount of points it costs to open a position at leverage=1
 BROKER_KEEP_FEE = (
     0.1  # amount of points it costs to keep an open position at leverage=1
@@ -922,11 +918,13 @@ BROKER_MAX_HOLD_TIME_SECS = 120  # after this amount of time, auto-sell (so user
 SIM_BATCHES_PER_SECOND = 2  # num sim batches per second
 SIM_BATCH_SIZE = 1  # how many steps are computed in one go to avoid locking too often
 seed = 43
+
 sim = market.MarketSimMix(
     (
         market.MarketSim(  # this sim provides high frequency "day trading" dynamics that can be changed by fake X posts etc
             base_value=100.0,
             bounce_back_value=40.0,
+            upper_bounce_back_value=400.0,
             market_boost_increase_factor=1.0,
             seed=seed,
             stddev=0.005,
@@ -966,6 +964,7 @@ sim = market.MarketSimMix(
         market.MarketSim(  # this simulation provides low frequency hourly / 20-minute trends that must not be influenced by events
             base_value=100,
             bounce_back_value=40,
+            upper_bounce_back_value=600.0,
             market_boost_increase_factor=1.0,
             seed=seed,
             stddev=0.06,
@@ -989,8 +988,42 @@ sim = market.MarketSimMix(
 )
 MIN_REACHABLE_PRICE = math.ceil(sum(s.bounce_back_value for s in sim.sims))
 
+with open("config.json") as f:
+    config = json.load(f)
+# convert the json repr of beff jezos into a CamlCoinUserInfo object
+_beff_jezos: dict = config["beff_jezos_user_info"]
+config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
+    _beff_jezos["user_id"],
+    int(_beff_jezos["private_key"], base=16).to_bytes(
+        cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
+    ),
+    int(_beff_jezos["public_key"], base=16).to_bytes(
+        cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
+    ),
+)
+beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
+cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
+api_headers = {"Authorization": f"Bearer {config['api_key']}"}
+# user_management.create_users_table()
+
+MAX_PROFIT_POINTS = None
+if "max_profit_points" in config:
+    MAX_PROFIT_POINTS = config["max_profit_points"]
+
 broker_leverage_min_backup_capital_pairs = (
     [  # inner dict is (a, b) pair where min backup capital is a * leverage + b
+        (
+            5000,
+            (100, MAX_PROFIT_POINTS) if MAX_PROFIT_POINTS is None else (0, MAX_PROFIT_POINTS + 1000),
+        ),
+        (
+            3000,
+            (50, MIN_REACHABLE_PRICE),
+        ),
+        (
+            1000,
+            (20, MIN_REACHABLE_PRICE),
+        ),
         (
             300,
             (5, MIN_REACHABLE_PRICE),
@@ -1022,27 +1055,6 @@ next_market_step = 0
 SIM_DATA_BACKLOG_SIZE = 50_000
 users = {}
 sim_data_lock = threading.Lock()
-with open("config.json") as f:
-    config = json.load(f)
-# convert the json repr of beff jezos into a CamlCoinUserInfo object
-_beff_jezos: dict = config["beff_jezos_user_info"]
-config["beff_jezos_user_info"] = user_management.CamlCoinUserInfo(
-    _beff_jezos["user_id"],
-    int(_beff_jezos["private_key"], base=16).to_bytes(
-        cc_utils.PRIVATE_KEY_SIZE, cc_utils.ENDIAN
-    ),
-    int(_beff_jezos["public_key"], base=16).to_bytes(
-        cc_utils.PUBLIC_KEY_SIZE, cc_utils.ENDIAN
-    ),
-)
-beff_jezos: "user_management.CamlCoinUserInfo" = config["beff_jezos_user_info"]
-cc_utils.balances[beff_jezos.public_key] = config["beff_jezos_wealth"]
-api_headers = {"Authorization": f"Bearer {config['api_key']}"}
-# user_management.create_users_table()
-
-MAX_PROFIT_POINTS = None
-if "max_profit_points" in config:
-    MAX_PROFIT_POINTS = config["max_profit_points"]
 
 n_valid_admin_requests = 0
 

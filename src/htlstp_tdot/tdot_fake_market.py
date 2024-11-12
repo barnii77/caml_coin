@@ -177,7 +177,7 @@ positive_sentences = [
     "The community spirit here could power a whole city. 🌆💡",
     "It’s the kind of breakthrough that’ll make traditional finance look ancient. 🏦📈",
     "The only thing outpacing the tech is the community support. 🫂📈",
-    "You can practically feel the gains compounding as you watch. 📈💰"
+    "You can practically feel the gains compounding as you watch. 📈💰",
 ]
 
 negative_sentences = [
@@ -275,6 +275,7 @@ class MarketSim:
         self,
         base_value=0.0,
         bounce_back_value=0.0,
+        upper_bounce_back_value: Optional[float] = None,
         event_decay_factor=0.5,
         market_boost_increase_factor=1.0,
         stddev=1.0,
@@ -294,6 +295,7 @@ class MarketSim:
         # Initialize market state
         self.market_boost = 1
         self.bounce_back_value = bounce_back_value
+        self.upper_bounce_back_value = upper_bounce_back_value
         self.market_boost_increase_factor = market_boost_increase_factor
         self.price = 0
         self.event_boost = 0.0
@@ -364,11 +366,25 @@ class MarketSim:
                 noise + self.event_boost * self.event_boost_weight + self.base_value
             )
 
-            if self.price > self.bounce_back_value:
+            if self.price > self.bounce_back_value and (
+                self.upper_bounce_back_value is None
+                or self.upper_bounce_back_value > self.price
+            ):
                 self.event_boost *= self.decay_factor
                 self.market_boost *= self.market_boost_increase_factor
                 break
             else:
+                self.price = max(
+                    self.bounce_back_value,
+                    min(
+                        (
+                            self.upper_bounce_back_value
+                            if self.upper_bounce_back_value
+                            else self.price
+                        ),
+                        self.price,
+                    ),
+                )
                 self._resample_all_noise()
 
         # Handle events
@@ -387,14 +403,32 @@ class MarketSim:
 
     def _resample_all_noise(self):
         """Resample all noise values for every frequency."""
-        for freq in self.noise_frequencies:
-            self.noise_values[freq][1] = (
-                abs(random.gauss(0, self.stddev))
-                + self.bounce_back_value
-                - self.base_value
-            ) / sum(a * b for a, b in zip(self.inverse_frequencies, self.extra_freq_weights))
-            self.event_boost = 0
-            self.market_boost = 1
+        if abs(self.price - self.upper_bounce_back_value) < abs(
+            self.price - self.bounce_back_value
+        ):
+            for freq in self.noise_frequencies:
+                self.noise_values[freq][1] = (
+                    abs(random.gauss(0, self.stddev))
+                    + self.upper_bounce_back_value
+                    - self.base_value
+                ) / sum(
+                    a * b
+                    for a, b in zip(self.inverse_frequencies, self.extra_freq_weights)
+                )
+                self.event_boost = 0
+                self.market_boost = 1
+        else:
+            for freq in self.noise_frequencies:
+                self.noise_values[freq][1] = (
+                    abs(random.gauss(0, self.stddev))
+                    + self.bounce_back_value
+                    - self.base_value
+                ) / sum(
+                    a * b
+                    for a, b in zip(self.inverse_frequencies, self.extra_freq_weights)
+                )
+                self.event_boost = 0
+                self.market_boost = 1
         self.step_counter = 0
 
     def _handle_event(self, mag, sentiment):
@@ -424,7 +458,11 @@ class MarketSim:
 
 
 class MarketSimMix:
-    def __init__(self, sims: tuple["MarketSim", ...], event_inject_queues: tuple[Optional[list], ...]):
+    def __init__(
+        self,
+        sims: tuple["MarketSim", ...],
+        event_inject_queues: tuple[Optional[list], ...],
+    ):
         assert len(sims) == len(event_inject_queues)
         self.sims: Tuple["MarketSim", ...] = sims
         self.event_inject_queues = event_inject_queues
@@ -437,7 +475,7 @@ class MarketSimMix:
             price, event = sim.step(eiq)
             net_price += price
             if event is not None:
-                out_event = event  # TODO this is very hacky since it should show the most important event, but should be enough for my specific use of this class
+                out_event = event
         self.price = net_price
         return net_price, out_event
 

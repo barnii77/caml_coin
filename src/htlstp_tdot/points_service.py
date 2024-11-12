@@ -356,16 +356,22 @@ def index():
 
 def run_background_services():
     while True:
-        token_to_user_id.clear()
-        time.sleep(BACKGROUND_SERVICE_INTERVAL_SECS)
+        t = time.time()
+        for token in set(token_to_user_id.keys()):
+            if token_create_time[token] - t > TOKEN_LIFETIME:
+                token_to_user_id.pop(token)
+                token_create_time.pop(token)
+        time.sleep(BACKGROUND_SERVICE_INTERVAL)
 
 
-BACKGROUND_SERVICE_INTERVAL_SECS = 120
+TOKEN_LIFETIME = 120
+BACKGROUND_SERVICE_INTERVAL = 60
 TOKEN_SIZE = 6
 with open("config.json") as f:
     config = json.load(f)
 init_db()
 token_to_user_id = {}
+token_create_time = {}
 data_dump_thread = threading.Thread(target=run_background_services)
 data_dump_thread.start()
 

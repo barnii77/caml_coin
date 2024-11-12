@@ -4,7 +4,7 @@
   "htl_points_service": "https://schnitzeljagd.if.htlstp.ac.at",
   "custom_points_service": "https://points.tdot.at",
   "points_service": "https://points.tdot.at",
-  "max_profit_points": null,
+  "max_profit_points": 999999999,
   "beff_jezos_user_info": {
     "user_id": "",
     "private_key": "0x834e46bb167a60aaeedcc66ab5c6d30a4e1fcb97fa780a9f43f45b90db0be400",
