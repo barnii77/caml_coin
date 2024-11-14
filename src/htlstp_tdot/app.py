@@ -976,15 +976,15 @@ sim = market.MarketSimMix(
                 96 / (20 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
                 256 / (60 * 20 * SIM_BATCHES_PER_SECOND * SIM_BATCH_SIZE),
             ],
-            event_decay_factor=0,
-            event_impact=0,
-            event_boost_weight=0,
-            event_prob=0,
-            event_change_trend_min_stds_from_mean=0,
-            event_change_trend_weight=0,
+            event_decay_factor=0.99999999,
+            event_impact=0.015,
+            event_boost_weight=50,
+            event_prob=0.01,
+            event_change_trend_min_stds_from_mean=0.2,
+            event_change_trend_weight=0.1,
         ),
     ),
-    (user_buy_sell_event_queue, None),
+    (user_buy_sell_event_queue, user_buy_sell_event_queue),
 )
 MIN_REACHABLE_PRICE = math.ceil(sum(s.bounce_back_value for s in sim.sims))
 

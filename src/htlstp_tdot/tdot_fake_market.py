@@ -8,7 +8,7 @@ first_names = [
     "Michael",
     "David",
     "Charlie",
-    "Constantin",
+    "Konstantin",
     "Elon",
     "Tom",
     "Andreas",
@@ -255,7 +255,7 @@ def generate_cryptocurrency_opinion():
 
 def get_market_event(eiq):
     if eiq:
-        return eiq.pop(0)
+        return eiq[0]
     event_generators = [generate_cryptocurrency_opinion]
     return random.choice(event_generators)()
 
@@ -476,6 +476,13 @@ class MarketSimMix:
             net_price += price
             if event is not None:
                 out_event = event
+        qs = set()
+        for eiq in self.event_inject_queues:
+            if id(eiq) in qs:
+                continue
+            qs.add(id(eiq))
+            if eiq:
+                eiq.pop(0)
         self.price = net_price
         return net_price, out_event
 

@@ -160,7 +160,7 @@ def create_user(email, username, password):
     c = conn.cursor()
     c.execute(
         "INSERT INTO users (user_id, points, email, password_hash, salt, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (create_user_id(), 0, email, password_hash, salt, username, time.time()),
+        (create_user_id(), STARTING_POINTS, email, password_hash, salt, username, time.time()),
     )
     conn.commit()
     conn.close()
@@ -355,24 +355,46 @@ def index():
 
 
 def run_background_services():
+    global STARTING_POINTS
     while True:
+        time.sleep(BACKGROUND_SERVICE_INTERVAL)
+
         t = time.time()
         for token in set(token_to_user_id.keys()):
             if token_create_time[token] - t > TOKEN_LIFETIME:
                 token_to_user_id.pop(token)
                 token_create_time.pop(token)
-        time.sleep(BACKGROUND_SERVICE_INTERVAL)
+
+        # hot reload config
+        with open("config.json") as f:
+            new_config = json.load(f)
+        for k, v in new_config:
+            config[k] = v
+
+        STARTING_POINTS = config.get("points_service_starting_points", 0)
+
+
+def restart_on_crash(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                pass
+
+    return wrapper
 
 
 TOKEN_LIFETIME = 120
-BACKGROUND_SERVICE_INTERVAL = 60
+BACKGROUND_SERVICE_INTERVAL = 20
 TOKEN_SIZE = 6
 with open("config.json") as f:
     config = json.load(f)
+STARTING_POINTS = config.get("points_service_starting_points", 0)
 init_db()
 token_to_user_id = {}
 token_create_time = {}
-data_dump_thread = threading.Thread(target=run_background_services)
+data_dump_thread = threading.Thread(target=restart_on_crash(run_background_services))
 data_dump_thread.start()
 
 
