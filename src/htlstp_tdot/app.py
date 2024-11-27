@@ -738,6 +738,8 @@ def api_route_get_market_steps_since(n: int):
                 ),
                 400,
             )
+        elif next_market_step - n >= len(sim_data):
+            return jsonify_error(f"the requested window size exceeds the server-side lookback window"), 400
         return (
             (
                 jsonify(
@@ -1052,7 +1054,7 @@ user_id_to_readable_name = {}
 user_broker_notifications = {}
 sim_data = []
 next_market_step = 0
-SIM_DATA_BACKLOG_SIZE = 50_000
+SIM_DATA_BACKLOG_SIZE = 510
 users = {}
 sim_data_lock = threading.Lock()
 
