@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 import os
@@ -306,6 +307,11 @@ def create_redirect_uri():
     )
 
 
+def verify_email(email):
+    email_regex = r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
+    return re.match(email_regex, email)
+
+
 @app.route("/auth/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
@@ -313,6 +319,8 @@ def login():
     state = request.args.get("state")
     callback_uri = request.args.get("redirect_uri")
     email = request.form.get("email")
+    if not verify_email(email):
+        return jsonify(error="Invalid email"), 400
     password = request.form.get("password")
     out = get_user_id_from_email(email)
     if "error" in out:
@@ -338,6 +346,8 @@ def sign_up():
     callback_uri = request.args.get("redirect_uri")
     state = request.args.get("state")
     email = request.form.get("email")
+    if not verify_email(email):
+        return jsonify(error="Invalid email"), 400
     username = request.form.get("username")
     if not username or not all(c.isalnum() or c in "#.$!?+~*-|@" for c in username):
         return (
@@ -368,6 +378,8 @@ def get_login_token():
     if request.method == "GET":
         return render_template("points_service_get_token.html")
     email = request.form.get("email")
+    if not verify_email(email):
+        return jsonify(error="Invalid email"), 400
     password = request.form.get("password")
     out = get_user_id_from_email(email)
     if "error" in out:
