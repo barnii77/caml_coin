@@ -316,6 +316,8 @@ def sign_up():
     state = request.args.get("state")
     email = request.form.get("email")
     username = request.form.get("username")
+    if not all(c.isalnum() or c in "#.$!?+~*-|@" for c in username):
+        return jsonify(error="Username must only contain alphanumeric characters and '#.$!?+~*-|@'"), 400
     password = request.form.get("password")
     out = create_user(email, username, password)
     if "error" in out:
