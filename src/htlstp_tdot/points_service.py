@@ -319,8 +319,8 @@ def login():
     state = request.args.get("state")
     callback_uri = request.args.get("redirect_uri")
     email = request.form.get("email")
-    if not verify_email(email):
-        return jsonify(error="Invalid email"), 400
+    # if not verify_email(email):
+    #     return jsonify(error="Invalid email"), 400
     password = request.form.get("password")
     out = get_user_id_from_email(email)
     if "error" in out:
@@ -378,8 +378,8 @@ def get_login_token():
     if request.method == "GET":
         return render_template("points_service_get_token.html")
     email = request.form.get("email")
-    if not verify_email(email):
-        return jsonify(error="Invalid email"), 400
+    # if not verify_email(email):
+    #     return jsonify(error="Invalid email"), 400
     password = request.form.get("password")
     out = get_user_id_from_email(email)
     if "error" in out:
