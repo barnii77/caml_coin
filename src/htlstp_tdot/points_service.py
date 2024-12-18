@@ -7,7 +7,15 @@ import string
 import hashlib
 import threading
 import sqlite3
-from flask import Flask, request, jsonify, render_template, redirect, url_for, send_from_directory
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    render_template,
+    redirect,
+    url_for,
+    send_from_directory,
+)
 from urllib.parse import urlencode
 
 app = Flask(__name__)
@@ -160,7 +168,15 @@ def create_user(email, username, password):
     c = conn.cursor()
     c.execute(
         "INSERT INTO users (user_id, points, email, password_hash, salt, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (create_user_id(), STARTING_POINTS, email, password_hash, salt, username, time.time()),
+        (
+            create_user_id(),
+            STARTING_POINTS,
+            email,
+            password_hash,
+            salt,
+            username,
+            time.time(),
+        ),
     )
     conn.commit()
     conn.close()
@@ -285,7 +301,9 @@ def create_redirect_uri():
     redirect_uri = request.args.get("redirect_uri")
     if not redirect_uri or not state:
         return jsonify(error="Bad request"), 400
-    return jsonify(value=url_for("login", state=state, redirect_uri=redirect_uri, _external=True))
+    return jsonify(
+        value=url_for("login", state=state, redirect_uri=redirect_uri, _external=True)
+    )
 
 
 @app.route("/auth/login", methods=["GET", "POST"])
@@ -303,8 +321,13 @@ def login():
 
     if user_check_password(user_id, password):
         if callback_uri and state:
-            return redirect(f"{callback_uri}?{urlencode({'state': state, 'userId': user_id})}")
-        return render_template("points_service_logged_in.html", points=get_user_points(user_id).get("points"))
+            return redirect(
+                f"{callback_uri}?{urlencode({'state': state, 'userId': user_id})}"
+            )
+        return render_template(
+            "points_service_logged_in.html",
+            points=get_user_points(user_id).get("points"),
+        )
     return jsonify(error="Incorrect password"), 401
 
 
@@ -316,8 +339,13 @@ def sign_up():
     state = request.args.get("state")
     email = request.form.get("email")
     username = request.form.get("username")
-    if not all(c.isalnum() or c in "#.$!?+~*-|@" for c in username):
-        return jsonify(error="Username must only contain alphanumeric characters and '#.$!?+~*-|@'"), 400
+    if not username or not all(c.isalnum() or c in "#.$!?+~*-|@" for c in username):
+        return (
+            jsonify(
+                error="Username must not be empty and must only contain alphanumeric characters and '#.$!?+~*-|@'"
+            ),
+            400,
+        )
     password = request.form.get("password")
     out = create_user(email, username, password)
     if "error" in out:
@@ -328,7 +356,9 @@ def sign_up():
     user_id = out["user_id"]
     if user_check_password(user_id, password):
         if callback_uri and state:
-            return redirect(f"{callback_uri}?{urlencode({'state': state, 'userId': user_id})}")
+            return redirect(
+                f"{callback_uri}?{urlencode({'state': state, 'userId': user_id})}"
+            )
         return render_template("points_service_signup_successful.html")
     return jsonify(error="Incorrect password, sign-up messed something up; sry :("), 401
 
@@ -345,7 +375,7 @@ def get_login_token():
     user_id = out["user_id"]
     if user_check_password(user_id, password):
         chars = string.digits + string.ascii_lowercase
-        token = ''.join(secrets.choice(chars) for _ in range(TOKEN_SIZE))
+        token = "".join(secrets.choice(chars) for _ in range(TOKEN_SIZE))
         token_to_user_id[token] = user_id
         return render_template("points_service_show_token.html", token=token)
     return jsonify(error="Incorrect password"), 401
